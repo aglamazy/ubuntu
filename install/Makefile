@@ -1,4 +1,4 @@
-develop: .git_installed .speedcrunch  .system .xdebug .gimp .chrome .phpstorm
+develop: .git_installed .speedcrunch  .system .xdebug .gimp .chrome .phpstorm .rclone .nvm
 
 .git_installed:
 	sudo apt install git
@@ -44,3 +44,11 @@ develop: .git_installed .speedcrunch  .system .xdebug .gimp .chrome .phpstorm
 .phpstorm:
 	./phpstorm
 	touch .phpstorm
+
+.rclone:
+	sudo -v ; curl https://rclone.org/install.sh | sudo bash
+	touch .rclone	
+
+.nvm:
+	curl https://raw.githubusercontent.com/creationix/nvm/master/install.sh | bash 	
+	touch .nvm
