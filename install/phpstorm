@@ -1,0 +1,5 @@
+#!/bin/bash -f
+sudo apt update
+sudo apt install ubuntu-make
+umake ide phpstorm
+
