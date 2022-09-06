@@ -1,0 +1,4 @@
+#!/bin/bash
+temp_file=/tmp/lsof.out
+lsof > $temp_file
+cat $temp_file | awk '{print $1}' | uniq -c | sort -n

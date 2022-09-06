@@ -1,0 +1,2 @@
+#!/bin/bash
+rclone --progress copy /media/agla/Transcend/Dropbox dropbox:

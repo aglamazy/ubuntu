@@ -1,0 +1,9 @@
+#!/usr/bin/tcsh -f
+foreach f ( `ls` )
+	set d=`date +"%d-%m-%y" -r $f`
+	if (! -d $d) then
+		 mkdir $d
+	endif
+	mv $f $d
+end
+	

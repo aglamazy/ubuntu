@@ -1,0 +1,4 @@
+key=~/.ssh/home
+ssh -i $key git@git.wpengine.com info
+git config --local core.sshCommand "/usr/bin/ssh -i $key"
+

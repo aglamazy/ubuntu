@@ -1,0 +1,2 @@
+umount /dev/vg_salon/lv_home
+mount /dev/vg_salon/lv_home /mnt/lv_home/
