@@ -1,0 +1,4 @@
+#!/bin/bash
+
+systemd-resolve --status | grep DNS
+
