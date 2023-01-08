@@ -1,3 +1,4 @@
+// USAGE cat env_file | ts-node azure_env2env.ts > .env
 
 process.stdin.on('data', data => {
 	const settings = JSON.parse(data.toString());
