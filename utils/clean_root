@@ -4,6 +4,9 @@ df -h /
 
 echo ---------------------
 
+echo clean journal
+journalctl --vacuum-time=7d
+
 echo Gettiog rid of partial packages
 echo Cleaning apt
 apt-get clean && apt-get autoclean
