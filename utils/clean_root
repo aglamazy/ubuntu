@@ -5,7 +5,7 @@ df -h /
 echo ---------------------
 
 echo clean journal
-journalctl --vacuum-time=7d
+journalctl --vacuum-time=2d
 
 echo Gettiog rid of partial packages
 echo Cleaning apt
@@ -30,7 +30,7 @@ apt-get install linux-headers-`uname -r|cut -d'-' -f3`-`uname -r|cut -d'-' -f4`
 
 echo Cleaning snap
 __dir=`dirname $0`
-# $__dir/clean_snap
+$__dir/clean_snap
 
 #Cleaning is completed
 echo "Cleaning is complete"
