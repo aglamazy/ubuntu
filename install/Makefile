@@ -1,4 +1,4 @@
-develop: .git_installed .speedcrunch  .system .xdebug .gimp .chrome .phpstorm .rclone .nvm
+develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .node .webstorm .datagrip
 
 .git_installed:
 	sudo apt install git
@@ -17,7 +17,6 @@ develop: .git_installed .speedcrunch  .system .xdebug .gimp .chrome .phpstorm .r
 	sudo apt install wordpress php libapache2-mod-php mysql-server php-mysql
 
 .system:
-	sudo apt update
 	sudo apt install gparted
 
 .xdebug:
@@ -28,27 +27,26 @@ develop: .git_installed .speedcrunch  .system .xdebug .gimp .chrome .phpstorm .r
 	sudo apt-get install gimp
 	touch .gimp
 
-.chrome: .nala
+.chrome:
 	./install_chrome
 	touch .chrome
 
-.nala:	.phyton
-	./install_nala
-	touch .nala
-
-.phyton:
-	./install_python3
-	touch .phyton
-
-
 .phpstorm:
-	./phpstorm
-	touch .phpstorm
+	sudo snap install phpstorm --classic
+	touch $@
+
+.webstorm:
+	sudo snap install webstorm --classic
+	touch $@
+
+.datagrip:
+	sudo snap install datagrip --classic
+	touch $@
 
 .rclone:
 	sudo -v ; curl https://rclone.org/install.sh | sudo bash
 	touch .rclone	
 
-.nvm:
-	curl https://raw.githubusercontent.com/creationix/nvm/master/install.sh | bash 	
+.node:
+	sudo snap install node --channel=18/stable --classic
 	touch .nvm
