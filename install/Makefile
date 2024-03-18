@@ -1,4 +1,4 @@
-develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .node .webstorm .datagrip
+develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .node .webstorm .datagrip .curl
 
 .git_installed:
 	sudo apt install git
