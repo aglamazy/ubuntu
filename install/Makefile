@@ -1,4 +1,4 @@
-develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .node .webstorm .datagrip .curl
+develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .node .webstorm .datagrip .curl .gettext .sass .nvm .compass
 
 .git_installed:
 	sudo apt install git
@@ -49,4 +49,24 @@ develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .n
 
 .node:
 	sudo snap install node --channel=18/stable --classic
-	touch .nvm
+	touch .node
+
+.gettext:
+	sudo apt-get install gettext
+	touch .gettext
+
+.sass:
+	sudo npm install -g sass
+	touch $@
+
+
+.nvm: .curl
+	curl https://raw.githubusercontent.com/creationix/nvm/master/install.sh | bash
+	touch .curl
+
+.compass:
+	cd /tmp
+	wget https://downloads.mongodb.com/compass/mongodb-compass_1.40.4_amd64.deb
+	sudo dpkg -i mongodb-compass_1.40.4_amd64.deb
+	touch $@
+	
