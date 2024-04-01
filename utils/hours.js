@@ -1,6 +1,8 @@
 const currentDate = new Date();
+
+console.log(process.argv);
 const year = currentDate.getFullYear();
-const month = currentDate.getMonth() + 1;
+const month = process.argv.length > 2 ? parseInt(process.argv[2]) : currentDate.getMonth() + 1;
 const day = currentDate.getDate();
 
 let sum = 0;
@@ -37,4 +39,6 @@ for (let i = 1; i <= number_of_month(year, month); i++) {
 }
 
 console.log(`Total working hours for ${months[month]} ${year}:`, sum);
-console.log(`Total upto now: ${sumUpNow}`);
+if (currentDate.getMonth() + 1 == month) {
+	console.log(`Total upto now: ${sumUpNow}`);
+}
