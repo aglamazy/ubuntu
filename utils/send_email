@@ -1,0 +1,24 @@
+#!/bin/bash
+
+# Configuration
+SMTP_SERVER="smtp.gmail.com"
+SMTP_PORT="587"
+SMTP_USER=""
+SMTP_PASS=""
+FROM=""
+TO=""
+SUBJECT=$1
+BODY="$(< /dev/stdin)"
+
+# Create email content
+EMAIL_CONTENT="Subject: ${SUBJECT}\r\nFrom: ${FROM}\r\nTo: ${TO}\r\n\r\n${BODY}"
+
+# Encode email content in base64
+EMAIL_CONTENT_ENCODED=$(echo -e "${EMAIL_CONTENT}" | base64)
+
+# Send email
+curl -s --url "smtp://${SMTP_SERVER}:${SMTP_PORT}" --ssl-reqd \
+  --mail-from "${FROM}" --mail-rcpt "${TO}" \
+  --upload-file <(echo -e "${EMAIL_CONTENT}") \
+  --user "${SMTP_USER}:${SMTP_PASS}" --insecure
+
