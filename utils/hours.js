@@ -1,5 +1,6 @@
-const year = 2024;
-const month = 1;
+const now = new Date();
+const year = now.getFullYear();
+const month = process.argv.length > 2 ? parseInt(process.argv[2]) : now.getMonth() + 1;
 let sum = 0;
 
 function isWeekend(day) {
@@ -9,7 +10,6 @@ function isWeekend(day) {
 function number_of_month(year, month) {
   return new Date(year, month, 0).getDate();
 }
-
 
 console.log("number of days in month: " + number_of_month(year, month));
 
@@ -27,4 +27,4 @@ for (let i = 1; i <= number_of_month(year, month); i++) {
   }
 }
 
-console.log("Total working hours for January 2024:", sum);
+console.log(`Total working hours for ${month}-${year}:`, sum);
