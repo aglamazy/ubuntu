@@ -1,0 +1,23 @@
+{
+  "name": "code-copilot-cli",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.14.10",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "fs-extra": "^11.2.0",
+    "openai": "^4.0.0",
+    "path": "^0.12.7",
+    "readline": "^1.3.0",
+    "typescript": "^5.5.3"
+  }
+}
