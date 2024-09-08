@@ -1,4 +1,6 @@
-develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .node .webstorm .datagrip .curl .gettext .sass .nvm .compass
+update:
+	sudo apt update
+	sudo apt install --only-upgrade google-chrome-stable
 
 .git_installed:
 	sudo apt install git
@@ -70,3 +72,6 @@ develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .n
 	sudo dpkg -i mongodb-compass_1.40.4_amd64.deb
 	touch $@
 	
+.php:
+	sudo apt-get install composer
+	touch .php
