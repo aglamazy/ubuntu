@@ -1,3 +1,4 @@
 .idea
 nodejs/.idea
 nodejs/node_modules
+/*/.env
