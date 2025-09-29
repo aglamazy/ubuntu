@@ -1,20 +1,26 @@
-const readline = require('readline');
+// azure-to-env.ts
+import { readFileSync, writeFileSync } from "fs";
 
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-});
+function quoteIfNeeded(v: string) {
+  const needsQuotes = /[\s#"'`]|^$/.test(v) || v.includes("\n") || v.includes("\r") || v.includes("=");
+  if (!needsQuotes) return v;
+  return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n")}"`;
+}
 
-let input = '';
+function sanitizeKey(k: string) {
+  return k.replace(/[^A-Z0-9_]/gi, "_");
+}
 
-rl.on('line', (line: string) => {
-    input += line + '\n';
-});
+const [,, inPath = "azure-settings.json", outPath = ".env"] = process.argv;
 
-rl.on('close', () => {
-    // process input
-    const vars = JSON.parse(input);
-    vars.forEach((definition: any) => {
-        console.log(definition.name, "=", definition.value)
-    })
-});
+const raw = readFileSync(inPath, "utf8");
+const arr: Array<{name:string; value:string; slotSetting?:boolean}> = JSON.parse(raw);
+
+const lines = arr
+  .filter(x => x && typeof x.name === "string")
+  .map(({ name, value }) => `${sanitizeKey(name)}=${quoteIfNeeded(String(value ?? ""))}`)
+  .join("\n") + "\n";
+
+writeFileSync(outPath, lines, "utf8");
+console.log(`Wrote ${outPath} with ${arr.length} vars`);
+

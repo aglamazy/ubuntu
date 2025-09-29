@@ -1,4 +1,4 @@
-develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .node .webstorm .datagrip .curl .gettext .sass .nvm .compass
+develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .node .webstorm .datagrip .curl .gettext .sass .nvm .compass .bashrc_shaped
 
 .git_installed:
 	sudo apt install git
@@ -69,4 +69,10 @@ develop: .git_installed .speedcrunch  .system .gimp .chrome .phpstorm .rclone .n
 	wget https://downloads.mongodb.com/compass/mongodb-compass_1.40.4_amd64.deb
 	sudo dpkg -i mongodb-compass_1.40.4_amd64.deb
 	touch $@
-	
+
+.PHONY: bashrc
+bashrc: .bashrc_shaped
+
+.bashrc_shaped:
+	bash ./shape_bashrc
+	touch .bashrc_shaped
