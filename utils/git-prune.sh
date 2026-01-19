@@ -57,7 +57,7 @@ fi
 echo "Reference branch: $main_branch"
 git fetch --prune
 
-protected_branches="main|master|develop|dev"
+protected_branches="main|master|develop|dev|working|prod|stg"
 protected_regex="^origin/(${protected_branches})$"
 
 # --- Helpers (bash >=4) ---
