@@ -4,49 +4,77 @@
 # Syncs branches across repos defined in .git-sync-settings.json
 # Each branch can have its own working directory
 
-SETTINGS_FILE=".git-sync-settings.json"
+source "$(dirname "$0")/git-sync-utils.sh"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+FILTER_BRANCHES=()
+PUSHED_BRANCHES=()
 
-# Find settings file in current dir or parent dirs
-find_settings() {
-    local dir="$PWD"
-    while [ "$dir" != "/" ]; do
-        if [ -f "$dir/$SETTINGS_FILE" ]; then
-            echo "$dir/$SETTINGS_FILE"
-            return 0
-        fi
-        dir=$(dirname "$dir")
-    done
-    return 1
+# Usage
+usage() {
+    echo "Usage: $(basename "$0") [OPTIONS]"
+    echo ""
+    echo "Syncs branches across repos defined in $GIT_SYNC_SETTINGS_FILE"
+    echo "Each branch can have its own working directory."
+    echo ""
+    echo "Options:"
+    echo "  -b, --branch BRANCH   Only sync the specified branch (can be repeated)"
+    echo "  -h, --help            Show this help message"
+    echo ""
+    echo "The settings file is searched for in the current directory and"
+    echo "parent directories."
+    exit 0
 }
 
-SETTINGS_PATH=$(find_settings)
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        -b|--branch)
+            if [[ -z "$2" || "$2" == -* ]]; then
+                echo "Error: --branch requires an argument"
+                exit 1
+            fi
+            FILTER_BRANCHES+=("$2")
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
 
-if [ -z "$SETTINGS_PATH" ]; then
-    echo -e "${RED}Error: $SETTINGS_FILE not found in current or parent directories${NC}"
-    exit 1
+gs_find_settings || { echo -e "${RED}Error: $GIT_SYNC_SETTINGS_FILE not found in current or parent directories${NC}"; exit 1; }
+gs_require_jq
+
+echo -e "${BLUE}Using settings: $GIT_SYNC_SETTINGS_PATH${NC}"
+if [ ${#FILTER_BRANCHES[@]} -gt 0 ]; then
+    echo -e "${BLUE}Filtering to branches: ${FILTER_BRANCHES[*]}${NC}"
 fi
 
-echo -e "${BLUE}Using settings: $SETTINGS_PATH${NC}"
-
-# Check for jq
-if ! command -v jq &> /dev/null; then
-    echo -e "${RED}Error: jq is required. Install with: sudo apt install jq${NC}"
-    exit 1
-fi
-
-# Get number of repos
-repo_count=$(jq '.repos | length' "$SETTINGS_PATH")
+repo_count=$(gs_repo_count)
 
 for ((i=0; i<repo_count; i++)); do
-    repo_name=$(jq -r ".repos[$i].name" "$SETTINGS_PATH")
-    branches=$(jq -r ".repos[$i].branches | keys[]" "$SETTINGS_PATH")
+    repo_name=$(gs_repo_name "$i")
+    all_branches=$(gs_repo_branches "$i")
+
+    # Filter branches for pull/push, but keep all_branches for comparison
+    if [ ${#FILTER_BRANCHES[@]} -gt 0 ]; then
+        sync_branches=""
+        for fb in "${FILTER_BRANCHES[@]}"; do
+            if echo "$all_branches" | grep -qx "$fb"; then
+                sync_branches="${sync_branches:+$sync_branches$'\n'}$fb"
+            fi
+        done
+        if [ -z "$sync_branches" ]; then
+            continue  # No matching branches in this repo, skip it
+        fi
+    else
+        sync_branches="$all_branches"
+    fi
 
     echo -e "\n${BLUE}═══════════════════════════════════════${NC}"
     echo -e "${BLUE}  Repository: ${YELLOW}$repo_name${NC}"
@@ -54,18 +82,49 @@ for ((i=0; i<repo_count; i++)); do
 
     # Fetch all branches first
     echo -e "${YELLOW}  Fetching remotes...${NC}"
-    for branch in $branches; do
-        branch_path=$(jq -r ".repos[$i].branches[\"$branch\"]" "$SETTINGS_PATH")
+    for branch in $all_branches; do
+        branch_path=$(gs_branch_path "$i" "$branch")
         if [ -e "$branch_path/.git" ]; then
             (cd "$branch_path" && git fetch --all --quiet 2>/dev/null)
             break  # Only need to fetch once per remote
         fi
     done
 
+    # Sync local commits with origin (pull if behind, then push if ahead)
+    for branch in $sync_branches; do
+        branch_path=$(gs_branch_path "$i" "$branch")
+        if [ -e "$branch_path/.git" ]; then
+            local_ahead=$(cd "$branch_path" && git rev-list --count "origin/$branch..$branch" 2>/dev/null || echo "0")
+            remote_ahead=$(cd "$branch_path" && git rev-list --count "$branch..origin/$branch" 2>/dev/null || echo "0")
+
+            # Pull if remote is ahead
+            if [ "$remote_ahead" -gt 0 ]; then
+                echo -e "  ${YELLOW}Pulling $remote_ahead commit(s) from origin/$branch...${NC}"
+                if (cd "$branch_path" && git pull --rebase --quiet origin "$branch"); then
+                    echo -e "  ${GREEN}✓ Pulled from origin/$branch${NC}"
+                else
+                    echo -e "  ${RED}✗ Failed to pull from origin/$branch${NC}"
+                    continue
+                fi
+            fi
+
+            # Push if local is ahead
+            if [ "$local_ahead" -gt 0 ]; then
+                echo -e "  ${YELLOW}Pushing $local_ahead local commit(s) to origin/$branch...${NC}"
+                if (cd "$branch_path" && git push --quiet origin "$branch"); then
+                    echo -e "  ${GREEN}✓ Pushed to origin/$branch${NC}"
+                    PUSHED_BRANCHES+=("$branch")
+                else
+                    echo -e "  ${RED}✗ Failed to push to origin/$branch${NC}"
+                fi
+            fi
+        fi
+    done
+
     # Compare branches using first available repo
     first_path=""
-    for branch in $branches; do
-        branch_path=$(jq -r ".repos[$i].branches[\"$branch\"]" "$SETTINGS_PATH")
+    for branch in $all_branches; do
+        branch_path=$(gs_branch_path "$i" "$branch")
         if [ -e "$branch_path/.git" ]; then
             first_path="$branch_path"
             break
@@ -82,13 +141,22 @@ for ((i=0; i<repo_count; i++)); do
     echo -e "\n  ${GREEN}Branch status:${NC}"
 
     declare -A ahead_counts
-    branch_array=($branches)
+    branch_array=($all_branches)
 
-    for branch in $branches; do
+    for branch in $all_branches; do
         ahead_counts[$branch]=0
     done
 
-    # Compare each pair of branches
+    # Include unpushed local commits in the count
+    for branch in $all_branches; do
+        branch_path=$(gs_branch_path "$i" "$branch")
+        if [ -e "$branch_path/.git" ]; then
+            local_extra=$(cd "$branch_path" && git rev-list --count "origin/$branch..$branch" 2>/dev/null || echo "0")
+            ahead_counts[$branch]=$((${ahead_counts[$branch]} + local_extra))
+        fi
+    done
+
+    # Compare each pair of branches (remote refs)
     for ((j=0; j<${#branch_array[@]}; j++)); do
         for ((k=j+1; k<${#branch_array[@]}; k++)); do
             b1=${branch_array[$j]}
@@ -106,7 +174,7 @@ for ((i=0; i<repo_count; i++)); do
     most_advanced=""
     max_ahead=0
 
-    for branch in $branches; do
+    for branch in $all_branches; do
         total_ahead=${ahead_counts[$branch]}
         if [ "$total_ahead" -gt "$max_ahead" ]; then
             max_ahead=$total_ahead
@@ -122,14 +190,23 @@ for ((i=0; i<repo_count; i++)); do
 
     echo -e "\n  ${YELLOW}Most advanced: $most_advanced (+$max_ahead commits)${NC}"
 
+    # Determine which branches to merge into
+    if [ ${#FILTER_BRANCHES[@]} -gt 0 ]; then
+        merge_branches="$sync_branches"
+    else
+        merge_branches="$all_branches"
+    fi
+
+    most_advanced_path=$(gs_branch_path "$i" "$most_advanced")
+
     # Show what will be merged
     echo -e "\n  ${BLUE}Changes to sync from $most_advanced:${NC}"
-    for branch in $branches; do
+    for branch in $merge_branches; do
         if [ "$branch" != "$most_advanced" ]; then
-            behind=$(git rev-list --count "origin/$branch..origin/$most_advanced" 2>/dev/null || echo "0")
+            behind=${ahead_counts[$most_advanced]}
             if [ "$behind" -gt 0 ]; then
-                branch_path=$(jq -r ".repos[$i].branches[\"$branch\"]" "$SETTINGS_PATH")
-                echo -e "    → $branch (${behind} commits behind) @ $branch_path"
+                branch_path=$(gs_branch_path "$i" "$branch")
+                echo -e "    → $branch @ $branch_path"
             fi
         fi
     done
@@ -140,30 +217,30 @@ for ((i=0; i<repo_count; i++)); do
     echo ""
 
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        for branch in $branches; do
+        for branch in $merge_branches; do
             if [ "$branch" != "$most_advanced" ]; then
-                behind=$(git rev-list --count "origin/$branch..origin/$most_advanced" 2>/dev/null || echo "0")
-                if [ "$behind" -gt 0 ]; then
-                    branch_path=$(jq -r ".repos[$i].branches[\"$branch\"]" "$SETTINGS_PATH")
+                branch_path=$(gs_branch_path "$i" "$branch")
 
-                    if [ ! -e "$branch_path/.git" ]; then
-                        echo -e "  ${RED}✗ Invalid path for $branch: $branch_path${NC}"
-                        continue
+                if [ ! -e "$branch_path/.git" ]; then
+                    echo -e "  ${RED}✗ Invalid path for $branch: $branch_path${NC}"
+                    continue
+                fi
+
+                echo -e "  ${YELLOW}Merging $most_advanced → $branch @ $branch_path${NC}"
+                cd "$branch_path" || continue
+
+                git checkout "$branch" --quiet 2>/dev/null
+                git pull --quiet origin "$branch" 2>/dev/null
+
+                # Merge directly from the local source directory (avoids pushing to origin first)
+                if git pull --no-edit "$most_advanced_path" "$most_advanced"; then
+                    if git push --quiet origin "$branch"; then
+                        PUSHED_BRANCHES+=("$branch")
                     fi
-
-                    echo -e "  ${YELLOW}Merging $most_advanced → $branch @ $branch_path${NC}"
-                    cd "$branch_path" || continue
-
-                    git checkout "$branch" --quiet 2>/dev/null
-                    git pull --quiet
-
-                    if git merge "origin/$most_advanced" --no-edit; then
-                        git push --quiet
-                        echo -e "  ${GREEN}✓ $branch updated${NC}"
-                    else
-                        echo -e "  ${RED}✗ Merge conflict in $branch - resolve manually${NC}"
-                        git merge --abort 2>/dev/null
-                    fi
+                    echo -e "  ${GREEN}✓ $branch updated and pushed${NC}"
+                else
+                    echo -e "  ${RED}✗ Merge conflict in $branch - resolve manually${NC}"
+                    git merge --abort 2>/dev/null
                 fi
             fi
         done
@@ -173,5 +250,21 @@ for ((i=0; i<repo_count; i++)); do
         echo -e "  ${YELLOW}Skipped${NC}"
     fi
 done
+
+# Deduplicate pushed branches
+unique_pushed=($(printf '%s\n' "${PUSHED_BRANCHES[@]}" | sort -u))
+
+if [ ${#unique_pushed[@]} -gt 0 ]; then
+    echo -e "\n${BLUE}Branches pushed: ${unique_pushed[*]}${NC}"
+    read -p "  Poll deployments? [y/N] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        poll_args=()
+        for pb in "${unique_pushed[@]}"; do
+            poll_args+=(-b "$pb")
+        done
+        GIT_SYNC_SETTINGS_PATH="$GIT_SYNC_SETTINGS_PATH" "$(dirname "$0")/git-sync-deploy-poll.sh" "${poll_args[@]}"
+    fi
+fi
 
 echo -e "\n${GREEN}Done!${NC}\n"

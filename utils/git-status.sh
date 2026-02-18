@@ -4,6 +4,8 @@
 # Usage: ./git-status.sh [--push|-p] [--branch|-b <branch>] [--prod|-bp] [--dev|-bd] [--stg|-bs] [directory]
 # If no directory specified, uses current directory
 
+source "$(dirname "$0")/git-sync-utils.sh"
+
 PUSH_TO_ORIGIN=false
 CHECKOUT_BRANCH=""
 TARGET_DIR="."
@@ -53,6 +55,9 @@ done
 # Convert to absolute path
 TARGET_DIR=$(cd "$TARGET_DIR" && pwd)
 
+# Load settings (optional - sync status only shown if found)
+gs_find_settings && gs_require_jq
+
 # Find all directories and files named .git (to support both regular repos and worktrees)
 find "$TARGET_DIR" -name ".git" \( -type d -o -type f \) 2>/dev/null | while read -r git_path; do
     # Get the repository directory (parent of .git)
@@ -92,6 +97,7 @@ find "$TARGET_DIR" -name ".git" \( -type d -o -type f \) 2>/dev/null | while rea
         ahead=0
         behind=0
 
+        any_push_needed=false
         if [ -n "$branch" ]; then
             ahead_behind=$(git rev-list --left-right --count origin/"$branch"..."$branch" 2>/dev/null)
             if [ -n "$ahead_behind" ]; then
@@ -100,11 +106,24 @@ find "$TARGET_DIR" -name ".git" \( -type d -o -type f \) 2>/dev/null | while rea
 
                 if [ "$ahead" -gt 0 ]; then
                     echo "⚠️  PUSH NEEDED: $ahead commit(s) ahead of origin/$branch"
+                    any_push_needed=true
                 fi
                 if [ "$behind" -gt 0 ]; then
                     echo "⬇️  PULL NEEDED: $behind commit(s) behind origin/$branch"
                 fi
             fi
+
+            # Compare against other branches from settings
+            for other in $(gs_branches_for_path "$repo_dir"); do
+                [ "$other" = "$branch" ] && continue
+                if git show-ref --verify --quiet "refs/remotes/origin/$other"; then
+                    other_ahead=$(git rev-list --count "origin/$other..HEAD" 2>/dev/null)
+                    if [ -n "$other_ahead" ] && [ "$other_ahead" -gt 0 ]; then
+                        echo "⚠️  SYNC NEEDED: $other_ahead commit(s) not in $other"
+                        any_push_needed=true
+                    fi
+                fi
+            done
         fi
 
         # Show uncommitted changes
@@ -115,7 +134,7 @@ find "$TARGET_DIR" -name ".git" \( -type d -o -type f \) 2>/dev/null | while rea
         fi
 
         # Show clean status only if everything is clean
-        if [ -z "$status_output" ] && [ "$ahead" -eq 0 ] && [ "$behind" -eq 0 ]; then
+        if [ -z "$status_output" ] && [ "$ahead" -eq 0 ] && [ "$behind" -eq 0 ] && [ "$any_push_needed" = false ]; then
             if [ -n "$branch" ]; then
                 echo "✓ Clean (up to date with origin/$branch)"
             else
