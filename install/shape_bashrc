@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Shape ~/.bashrc by inserting an idempotent managed block.
+# - Backs up existing file with a timestamp suffix.
+# - Removes any prior managed block between our markers.
+# - Appends a fresh block tailored for this repo and Ubuntu dev.
+
+MANAGED_BEGIN="# >>> ubuntu-dev managed >>>"
+MANAGED_END="# <<< ubuntu-dev managed <<<"
+
+BASHRC="${HOME}/.bashrc"
+TS=$(date +%Y%m%d-%H%M%S)
+
+# Resolve repo root as the parent of this script's directory
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+REPO_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)
+
+echo "[shape_bashrc] Target: ${BASHRC}"
+
+if [[ -f "${BASHRC}" ]]; then
+  cp -p "${BASHRC}" "${BASHRC}.backup.${TS}"
+  echo "[shape_bashrc] Backup created: ${BASHRC}.backup.${TS}"
+else
+  echo "[shape_bashrc] No existing ~/.bashrc found. Creating new one."
+  : > "${BASHRC}"
+fi
+
+# Strip any existing managed block
+if grep -q "^${MANAGED_BEGIN}$" "${BASHRC}" 2>/dev/null; then
+  awk -v begin="${MANAGED_BEGIN}" -v end="${MANAGED_END}" '
+    BEGIN { skip=0 }
+    $0==begin { skip=1; next }
+    $0==end { skip=0; next }
+    skip==0 { print }
+  ' "${BASHRC}" > "${BASHRC}.tmp" && mv "${BASHRC}.tmp" "${BASHRC}"
+  echo "[shape_bashrc] Previous managed block removed."
+fi
+
+# Compose the new managed block
+{
+  echo "${MANAGED_BEGIN}"
+  cat <<'BLOCK'
+# This block is managed by install/shape_bashrc. Do not edit inside.
+
+# Safer bash defaults and per-directory history for interactive shells
+# - histappend: append to history rather than overwrite
+# - cmdhist: combine multiline commands
+shopt -s histappend cmdhist
+
+# Per-directory history
+__dirhist() {
+  # Root for storing histories; mirrors full path under this root
+  local root="$HOME/.local/share/dirhist"
+  local pwd_now="$PWD"
+  local dir="$root$pwd_now"
+  local file="$dir/.bash_history"
+
+  # On directory change, flush previous, switch file, and reload
+  if [[ "${__DIRHIST_LAST_PWD:-}" != "$pwd_now" ]]; then
+    if [[ -n "${__DIRHIST_LAST_FILE:-}" ]]; then
+      HISTFILE="${__DIRHIST_LAST_FILE}"
+      builtin history -a   # flush pending lines to the previous dir's history
+    fi
+    mkdir -p "$dir"
+    touch "$file"        # do not truncate; preserve previous sessions
+    HISTFILE="$file"
+    __DIRHIST_LAST_PWD="$pwd_now"
+    __DIRHIST_LAST_FILE="$file"
+    builtin history -c     # clear in-memory list
+    builtin history -r     # reload this directory's history
+  else
+    HISTFILE="${__DIRHIST_LAST_FILE:-$file}"
+  fi
+}
+
+# Ensure PROMPT_COMMAND runs dirhist first, then appends history
+__prepend_prompt_command() {
+  local fn="$1"
+  case ";${PROMPT_COMMAND:-};" in
+    *";$fn;"*) ;; # already present
+    "") PROMPT_COMMAND="$fn" ;;
+    *) PROMPT_COMMAND="$fn; $PROMPT_COMMAND" ;;
+  esac
+}
+
+__prepend_prompt_command __dirhist
+__prepend_prompt_command 'history -a'
+
+# Local bin path
+export PATH="$HOME/.local/bin:$PATH"
+
+# Load NVM if present
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+  . "$HOME/.nvm/nvm.sh"
+fi
+
+# Common aliases
+alias ll='ls -alF'
+alias la='ls -A'
+alias gs='git status -sb'
+
+# Downloads helpers
+lastdl() {
+  local dir file
+  dir="${XDG_DOWNLOAD_DIR:-}"
+  if [[ -z "$dir" ]] && [[ -f "$HOME/.config/user-dirs.dirs" ]]; then
+    dir=$(grep '^XDG_DOWNLOAD_DIR=' "$HOME/.config/user-dirs.dirs" | cut -d= -f2- | tr -d '"')
+    dir=${dir//\$HOME/$HOME}
+  fi
+  dir="${dir:-$HOME/Downloads}"
+
+  file=$(find "$dir" -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null \
+           | sort -nr | head -n1 | cut -d' ' -f2-)
+  if [[ -n "$file" ]]; then
+    printf '%s\n' "$file"
+  else
+    return 1
+  fi
+}
+
+mvlastdl() {
+  local f
+  if ! f="$(lastdl)" || [[ -z "$f" ]]; then
+    echo "No recent file in Downloads." >&2
+    return 1
+  fi
+  mv -iv -- "$f" .
+  echo "Moved: $(basename -- "$f")"
+}
+
+# PhpStorm alias (local install)
+if [ -x "$HOME/installs/PhpStorm-241.19416.23/bin/phpstorm.sh" ]; then
+  alias phpstorm="$HOME/installs/PhpStorm-241.19416.23/bin/phpstorm.sh"
+fi
+
+# Repo-aware helpers (only if the repo exists at install time)
+BLOCK
+  echo "# Repo root (resolved during shaping): ${REPO_ROOT}"
+  echo "if [ -d '${REPO_ROOT}' ]; then"
+  echo "  export UBUNTU_DEV_REPO='${REPO_ROOT}'"
+  echo "  # Example alias into repo scripts"
+  if [[ -f "${REPO_ROOT}/services/power.sh" ]]; then
+    echo "  alias power-policy=\"bash '${REPO_ROOT}/services/power.sh'\""
+  fi
+  echo "fi"
+  echo "${MANAGED_END}"
+} >> "${BASHRC}"
+
+echo "[shape_bashrc] Managed block appended."
+echo "[shape_bashrc] Done. Start a new shell or 'source ~/.bashrc' to apply."
