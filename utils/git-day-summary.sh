@@ -17,6 +17,8 @@ show_help() {
     echo "  -a, --author NAME Filter by author (default: git config user.name)"
     echo "  --all             Show commits from all authors"
     echo "  -m, --month       Show monthly calendar view (YYYY-MM or YYYY-MM-DD)"
+    echo "  -w, --week        Show full work week (Sun-Thu) containing the given date"
+    echo "  --digest          AI digest: 3-5 bullets on biggest investments (requires claude)"
     echo ""
     echo "Examples:"
     echo "  git-day-summary.sh                              # Yesterday, current repo"
@@ -25,6 +27,8 @@ show_help() {
     echo "  git-day-summary.sh --all 2025-12-14 ~/projects  # All authors"
     echo "  git-day-summary.sh -a \"John\" 2025-12-14         # Specific author"
     echo "  git-day-summary.sh -m 2025-12 ~/projects        # Monthly calendar view"
+    echo "  git-day-summary.sh -w 2026-02-17 ~/projects     # Full work week"
+    echo "  git-day-summary.sh -w --digest 2026-02-17 ~/p   # Week + AI summary"
     exit 0
 }
 
@@ -32,6 +36,8 @@ show_help() {
 AUTHOR=""
 ALL_AUTHORS=false
 MONTH_VIEW=false
+WEEK_VIEW=false
+DIGEST=false
 DATE=""
 INPUT_PATHS=()
 
@@ -50,6 +56,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         -m|--month)
             MONTH_VIEW=true
+            shift
+            ;;
+        -w|--week)
+            WEEK_VIEW=true
+            shift
+            ;;
+        --digest)
+            DIGEST=true
             shift
             ;;
         -*)
@@ -103,6 +117,51 @@ done
 if [ ${#REPOS[@]} -eq 0 ]; then
     echo "No git repositories found"
     exit 1
+fi
+
+# Week view (Sun-Thu work week)
+if [ "$WEEK_VIEW" = true ]; then
+    # Find Sunday of the week containing DATE
+    DOW=$(date -d "$DATE" +%w)  # 0=Sun, 6=Sat
+    WEEK_START=$(date -d "$DATE - $DOW days" +%Y-%m-%d)
+
+    # Build args to pass through
+    PASS_ARGS=()
+    if [ "$ALL_AUTHORS" = true ]; then PASS_ARGS+=(--all); fi
+    if [ -n "$AUTHOR" ]; then PASS_ARGS+=(-a "$AUTHOR"); fi
+
+    WEEK_OUTPUT=""
+    TOTAL_COMMITS=0
+
+    # Sun(0) through Thu(4)
+    for ((i=0; i<=4; i++)); do
+        DAY_DATE=$(date -d "$WEEK_START + $i days" +%Y-%m-%d)
+        DAY_NAME=$(date -d "$DAY_DATE" +"%A")
+        DAY_OUTPUT=$("$0" "${PASS_ARGS[@]}" "$DAY_DATE" "${INPUT_PATHS[@]}")
+        DAY_COMMITS=$(echo "$DAY_OUTPUT" | grep "^Commits:" | awk '{print $2}')
+        TOTAL_COMMITS=$((TOTAL_COMMITS + ${DAY_COMMITS:-0}))
+        WEEK_OUTPUT+="$DAY_OUTPUT"$'\n\n'
+    done
+
+    WEEK_END=$(date -d "$WEEK_START + 4 days" +%Y-%m-%d)
+    echo "===== Week Summary: $WEEK_START → $WEEK_END ====="
+    echo "Total commits: $TOTAL_COMMITS"
+    echo ""
+    echo "$WEEK_OUTPUT"
+
+    # Digest via Claude Code
+    if [ "$DIGEST" = true ]; then
+        if command -v claude &>/dev/null; then
+            echo "--- AI Digest ---"
+            echo "$WEEK_OUTPUT" | claude -p \
+                "Here is a week of git commit summaries. Give me 3-5 concise bullets summarizing the biggest investments / areas of work this week. Focus on themes not individual commits. Be brief. Output in Hebrew. Use WhatsApp formatting: *bold* for emphasis. Output bullets only (use •), no intro, no markdown." \
+                --output-format text
+        else
+            echo "(--digest skipped: 'claude' CLI not found in PATH)"
+        fi
+    fi
+
+    exit 0
 fi
 
 # Monthly calendar view
