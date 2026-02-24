@@ -8,6 +8,7 @@ source "$(dirname "$0")/git-sync-utils.sh"
 
 FILTER_BRANCHES=()
 PUSHED_BRANCHES=()
+QUIET=false
 
 # Usage
 usage() {
@@ -18,6 +19,7 @@ usage() {
     echo ""
     echo "Options:"
     echo "  -b, --branch BRANCH   Only sync the specified branch (can be repeated)"
+    echo "  -q, --quiet, -y       Auto-approve syncing from most advanced branch"
     echo "  -h, --help            Show this help message"
     echo ""
     echo "The settings file is searched for in the current directory and"
@@ -38,6 +40,10 @@ while [[ $# -gt 0 ]]; do
             fi
             FILTER_BRANCHES+=("$2")
             shift 2
+            ;;
+        -q|--quiet|-y)
+            QUIET=true
+            shift
             ;;
         *)
             echo "Unknown option: $1"
@@ -211,10 +217,14 @@ for ((i=0; i<repo_count; i++)); do
         fi
     done
 
-    # Prompt user
-    echo ""
-    read -p "  Sync $most_advanced to other branches? [y/N] " -n 1 -r
-    echo ""
+    # Prompt user (skip in quiet mode)
+    if [ "$QUIET" = true ]; then
+        REPLY=y
+    else
+        echo ""
+        read -p "  Sync $most_advanced to other branches? [y/N] " -n 1 -r
+        echo ""
+    fi
 
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         for branch in $merge_branches; do
@@ -256,8 +266,12 @@ unique_pushed=($(printf '%s\n' "${PUSHED_BRANCHES[@]}" | sort -u))
 
 if [ ${#unique_pushed[@]} -gt 0 ]; then
     echo -e "\n${BLUE}Branches pushed: ${unique_pushed[*]}${NC}"
-    read -p "  Poll deployments? [y/N] " -n 1 -r
-    echo ""
+    if [ "$QUIET" = true ]; then
+        REPLY=n
+    else
+        read -p "  Poll deployments? [y/N] " -n 1 -r
+        echo ""
+    fi
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         poll_args=()
         for pb in "${unique_pushed[@]}"; do
