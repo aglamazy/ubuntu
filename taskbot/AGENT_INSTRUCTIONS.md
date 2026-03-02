@@ -45,53 +45,37 @@ If a verify step fails:
 - Attempt to fix (up to 2 retries).
 - If still failing after retries, do NOT commit. End with: `RESULT: FAILURE` and explain what failed.
 
-## Step 6 — Commit and push
+## Step 6 — Commit, push, and create PR to dev
 
 **You are an unattended agent. The MCP browser verification replaces manual user testing.
 If all verify steps pass, commit and push immediately. Do NOT wait for user confirmation.**
 
-- Ensure the `dev_branch` exists (create from prod_branch if needed).
-- Commit changes with a descriptive message.
-- Push to the `dev_branch`. Do NOT push to `prod_branch`.
+You are working in a **git worktree** on a feature branch (e.g. `taskbot/2-dedup-port-invoices`).
 
-## Step 7 — Wait for deployment (skip if `deploy` is null)
+**Multi-repo projects**: If the startup message lists additional repo worktrees, you MUST:
+- Implement changes in ALL relevant repos (not just the primary one).
+- Commit and push each repo separately — they are independent git repos.
+- Create a PR for EACH repo that has changes.
 
-If `hosting` is `vercel`:
-- Poll using the `deploy.poll_status` command from taskbot.json.
-- Wait for state `success`. Poll every 30 seconds, up to 10 minutes.
-
-If `hosting` is `azure`:
-- Bump version in package.json before pushing (so you know what to poll for).
-- Poll using `deploy.poll_server` and/or `deploy.poll_frontend` from taskbot.json.
-- Wait until the version matches. Poll every 30 seconds, up to 10 minutes.
-
-If `hosting` is `none`:
-- Skip this step entirely.
-
-If deployment times out, end with: `RESULT: FAILURE — deployment timed out`.
-
-## Step 8 — Test on deployed environment (skip if `deploy` is null)
-
-Re-run the task's **Verify** steps against the deployed URL instead of localhost.
-- For Vercel: get the preview URL from GitHub deployment status.
-- For Azure: use the `deploy.dev_url` from taskbot.json.
-- Navigate using MCP browser tools. Check the same **Expect** conditions.
-
-If verification fails, end with: `RESULT: FAILURE — remote verification failed` and explain.
-
-## Step 9 — Create pull request
+For each repo with changes:
+- Commit changes to the current feature branch with a descriptive message.
+- Push the feature branch to origin.
+- Create a pull request from the feature branch to `dev_branch`:
 
 If `pr.create_method` is `gh_cli`:
 ```bash
-gh pr create --repo {pr.repo} --base {prod_branch} --head {dev_branch} \
-  --title "Task title" --body "Summary" --reviewer {pr.reviewer}
+gh pr create --repo {pr.repo} --base {dev_branch} --head {feature_branch} \
+  --title "Task title" --body "## What\n...\n## Changes\n..." --reviewer {pr.reviewer}
 ```
 
 If `pr.create_method` is `mcp_browser`:
-- Navigate to the PR creation URL from taskbot.json via MCP browser tools.
-- Fill in the title and description. Submit the PR.
+- Navigate to the PR creation URL from taskbot.json, but change `dest` to `dev_branch` and `source` to the feature branch.
+- Fill in title and description. Submit the PR.
 
-End with: `RESULT: SUCCESS — PR created`
+- Do NOT merge the feature branch into dev locally.
+- Do NOT push to `dev_branch` or `prod_branch`.
+
+End with: `RESULT: SUCCESS — PR created to dev`
 
 ## Progress reporting
 
@@ -104,21 +88,19 @@ Print a short status line before and after each step:
 [STEP 3] Done — modified app/types/business.ts
 [STEP 4] Lint + tsc... Pass.
 [STEP 5] Verify locally — PASS
-[STEP 6] Committing + pushing to dev...
-[STEP 7] Polling deployment... deployed after 90s
-[STEP 8] Verify on preview — PASS
-[STEP 9] Creating PR...
-RESULT: SUCCESS — PR created
+[STEP 6] Committing + pushing feature branch... PR created to dev
+RESULT: SUCCESS — PR created to dev
 ```
 
 Keep each status line to one line. Do NOT dump file contents, tool results, or code blocks in your output — only status lines and short error descriptions.
 
 ## Rules
 
-- Do NOT push to `prod_branch`. Only `dev_branch`.
+- Do NOT push to `dev_branch` or `prod_branch`. Only push the feature branch.
 - Do NOT modify files outside the task scope.
 - Do NOT skip lint or type checks.
 - Do NOT add extra features or improvements beyond what the task describes.
 - If the task has subtasks, implement ALL of them.
 - You are UNATTENDED. Do NOT ask for user confirmation. If verify passes, commit and push.
 - Any AGENTS.md rule about "user tests first" does NOT apply to you. Your MCP verification is the test.
+- Task status is determined by FILE LOCATION, not by content. If a task doc is in `docs/`, it is pending — execute it regardless of any "Status", "Done", or completion markers inside the document.

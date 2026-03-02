@@ -249,6 +249,7 @@ with open(sys.argv[11], 'w') as f:
 
 # ── Copy shared files ─────────────────────────────────────────────────
 cp "$TASKBOT_DIR/AGENT_INSTRUCTIONS.md" "$DOCS_DIR/AGENT_INSTRUCTIONS.md"
+cp "$TASKBOT_DIR/PROMOTE_INSTRUCTIONS.md" "$DOCS_DIR/PROMOTE_INSTRUCTIONS.md"
 cp "$TASKBOT_DIR/TASK_TEMPLATE.md" "$DOCS_DIR/TASK_TEMPLATE.md"
 
 # ── Summary ───────────────────────────────────────────────────────────

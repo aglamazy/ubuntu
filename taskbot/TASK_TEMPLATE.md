@@ -13,11 +13,19 @@ What to change and where. Reference specific files and functions.
 
 ## Verify
 
-Steps the agent executes locally via MCP browser tools after implementing the fix.
-Each step is an action + expected result.
+Steps the agent executes after implementing the fix to confirm it actually worked.
+Each step is an action + expected result. Mix verification types as needed:
 
+**UI verification** (via MCP browser tools):
 - [ ] Navigate to `{url}`
 - [ ] {action — click, fill, wait for element}
 - [ ] **Expect**: {what should be visible/not visible/in console}
-- [ ] **Expect**: no console errors
 - [ ] Take screenshot
+
+**Data verification** (via DB query or API call):
+- [ ] Run: `{db query or curl command}`
+- [ ] **Expect**: {specific result — e.g. "0 rows", "count < 10", "no duplicates"}
+
+**Important**: Verify the *outcome*, not just that the code ran. For migrations, query the data.
+For bug fixes, reproduce the original bug scenario and confirm it's gone.
+For new features, test the actual user flow end-to-end.

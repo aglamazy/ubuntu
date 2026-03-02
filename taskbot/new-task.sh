@@ -60,7 +60,11 @@ Then interview the user about what needs to be done. Ask short, focused question
 2. Clarify scope — what's in, what's out.
 3. Explore the codebase to find relevant files and understand current architecture.
 4. Suggest an approach and which files to modify.
-5. Ask what the verify steps should test (what URL, what to click, what to expect).
+5. Ask how to VERIFY the outcome — not just 'does it deploy' but 'how do we prove it worked':
+   - For data changes: what DB query proves the data is correct?
+   - For bug fixes: what scenario triggered the bug, and what should happen now?
+   - For UI features: what page, what action, what should appear?
+   Push the user to define concrete pass/fail criteria.
 
 After the interview, write the task doc to:
   $DOCS_DIR/${NEXT_INDEX}-SLUG.md
