@@ -110,7 +110,7 @@ for PATH_ARG in "${INPUT_PATHS[@]}"; do
     elif [ -d "$PATH_ARG" ]; then
         while IFS= read -r repo; do
             REPOS+=("${repo%/.git}")
-        done < <(find "$PATH_ARG" -maxdepth 2 -type d -name ".git" 2>/dev/null)
+        done < <(find "$PATH_ARG" -maxdepth 2 -type d -name ".git" -not -path "*/node_modules/*" 2>/dev/null)
     fi
 done
 

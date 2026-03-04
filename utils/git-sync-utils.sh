@@ -120,14 +120,17 @@ gs_poll_deploy() {
             return 0
         fi
 
-        local display_current="${current:-unreachable}"
-        echo -e "    ⏳ ${elapsed}s - current: v${display_current}"
+        local display_current="${current:+v${current}}"
+        display_current="${display_current:-unreachable}"
+        echo -e "    ⏳ ${elapsed}s - current: ${display_current}"
 
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
 
-    echo -e "    ${RED}✗ Timed out after ${timeout}s (current: v${current:-unreachable}, expected: v${expected})${NC}"
+    local display_final="${current:+v${current}}"
+    display_final="${display_final:-unreachable}"
+    echo -e "    ${RED}✗ Timed out after ${timeout}s (current: ${display_final}, expected: v${expected})${NC}"
     return 1
 }
 
