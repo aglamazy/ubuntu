@@ -16,9 +16,48 @@ Read `taskbot.json` in the same `docs/` directory as this file. It contains:
 Read the task document you were given (from `docs/dev/`). Understand what was implemented
 so you can write the PR description and verify on dev and prod.
 
+## Step 2.5 — Create PR feature→dev (if not already done)
+
+Check the state context provided at startup. If `pr_url` is non-null, skip this step.
+
+If `pr_url` is null, create the PR now:
+- Build PR title from the task's Problem/Fix sections (short summary, under 72 chars).
+- Build PR description with sections: What, Why, Changes, Verify.
+
+If `pr.create_method` is `gh_cli`:
+```bash
+gh pr create --repo {pr.repo} --base {merge_into} --head {feature_branch} \
+  --title "Descriptive title from task" \
+  --body "## What\n...\n\n## Why\n...\n\n## Changes\n...\n\n## Verify\n..." \
+  --reviewer {pr.reviewer}
+```
+
+If `pr.create_method` is `mcp_browser`:
+- Navigate to the PR creation URL from taskbot.json.
+- Change `dest` to `merge_into` and `source` to the feature branch.
+- Fill in title and description. Submit the PR.
+
+Print: `[STEP 2.5] PR created: <url>`
+
+## Step 2.6 — Wait for feature→dev PR to be merged
+
+Poll the PR status until it is merged:
+
+If `pr.create_method` is `gh_cli`:
+```bash
+gh pr view --repo {pr.repo} --json state --jq '.state'
+```
+Wait for state `MERGED`. Poll every 60 seconds, up to 30 minutes.
+
+If `pr.create_method` is `mcp_browser`:
+- Check the PR page via MCP browser to see if it was merged.
+- Poll every 60 seconds, up to 30 minutes.
+
+If not merged after 30 minutes, end with: `RESULT: TIMEOUT — feature PR not merged`
+
 ## Step 3 — Wait for dev deployment (skip if `deploy` is null)
 
-The feature branch PR was already merged to dev. Wait for dev to deploy.
+Wait for the feature→dev PR to be merged (Step 2.6), then wait for dev to deploy.
 
 If `hosting` is `vercel`:
 - Poll using the `deploy.poll_status` command from taskbot.json.
@@ -117,6 +156,8 @@ Print a short status line before and after each step:
 ```
 [STEP 1] Reading config... (project: importa-server, hosting: azure)
 [STEP 2] Task: 2 - Dedup port invoices
+[STEP 2.5] PR created: https://github.com/org/repo/pull/42
+[STEP 2.6] Waiting for feature PR merge... merged after 3m
 [STEP 3] Polling dev deployment... deployed after 60s
 [STEP 4] Verify on dev — PASS
 [STEP 5] Creating PR to prod... PR created

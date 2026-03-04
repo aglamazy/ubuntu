@@ -1,5 +1,11 @@
 # {index} - {Task Title}
 
+## Workflow
+preset: standard
+operations: code, pr
+branch_from: dev
+merge_into: dev
+
 ## Problem
 What's wrong or what's needed. Be specific — include examples, error messages, screenshots if relevant.
 
