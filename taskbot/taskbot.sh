@@ -133,6 +133,10 @@ LOG_DIR="$PROJECT_DIR/task-logs"
 INSTRUCTIONS="$DOCS_DIR/AGENT_INSTRUCTIONS.md"
 STATE_DIR="$PROJECT_DIR/.taskbot-state"
 
+# ── Load helpers ──────────────────────────────────────────────────────
+# shellcheck source=taskbot-lib.sh
+source "$TASKBOT_HOME/taskbot-lib.sh"
+
 # ── Bare --run: start the project dev server (Next.js), no task needed ──
 if [ "$MODE" = "run" ] && [ -z "$TARGET_INDEX" ]; then
   exec "$TASKBOT_HOME/run-dev.sh" "$PROJECT_DIR"
@@ -576,13 +580,15 @@ PYEOF
   log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
   cd "$PROJECT_DIR"
-  CLOSE_PR_ARGS=(--base "$CLOSE_PROD_BRANCH" --head "$CLOSE_DEV_BRANCH" --title "$CLOSE_PR_TITLE")
+  CLOSE_PR_ARGS=(--base "$CLOSE_PROD_BRANCH" --head "$CLOSE_DEV_BRANCH" --title "$CLOSE_PR_TITLE" --fill)
   [ -n "$CLOSE_PR_REPO" ] && CLOSE_PR_ARGS=(--repo "$CLOSE_PR_REPO" "${CLOSE_PR_ARGS[@]}")
   [ -n "$CLOSE_PR_REVIEWER" ] && CLOSE_PR_ARGS=("${CLOSE_PR_ARGS[@]}" --reviewer "$CLOSE_PR_REVIEWER")
 
-  CLOSE_PR_URL=$(gh pr create "${CLOSE_PR_ARGS[@]}" 2>&1 | grep -E 'https?://' | tail -1 || true)
+  CLOSE_GH_OUTPUT=$(gh pr create "${CLOSE_PR_ARGS[@]}" 2>&1) || true
+  CLOSE_PR_URL=$(echo "$CLOSE_GH_OUTPUT" | grep -E 'https?://' | tail -1 || true)
   if [ -z "$CLOSE_PR_URL" ]; then
-    err "PR creation may have failed — check output above"
+    echo "$CLOSE_GH_OUTPUT"
+    err "PR creation failed"
     err "If a PR already exists, wait for merge and then run:"
     err "  mv '$CLOSE_TASK_PATH' '$DONE_DIR/$CLOSE_TASK'"
     err "  rm -f '$STATE_DIR/$CLOSE_SLUG.json'"
@@ -626,15 +632,93 @@ if [ "$MODE" = "run" ]; then
     exit 1
   fi
 
-  # Read run config
+  # Read run config (all fields optional — auto-detected from package.json if absent)
   RUN_CMD=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('run', {}).get('cmd', ''))" 2>/dev/null || true)
   RUN_PORT=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('run', {}).get('port', ''))" 2>/dev/null || true)
   RUN_ENV_FILES=$(python3 -c "import json; [print(f) for f in json.load(open('$DOCS_DIR/taskbot.json')).get('run', {}).get('env_files', ['.env'])]" 2>/dev/null || echo ".env")
 
+  # Auto-detect and write run config if cmd is missing
   if [ -z "$RUN_CMD" ]; then
-    err "No 'run.cmd' configured in $DOCS_DIR/taskbot.json"
-    err 'Add: "run": { "cmd": "npm run dev", "port": 3000, "env_files": [".env"] }'
-    exit 1
+    PKG="$PROJECT_DIR/package.json"
+    if [ ! -f "$PKG" ]; then
+      err "No 'run.cmd' in taskbot.json and no package.json found"
+      err 'Add to taskbot.json: "run": { "cmd": "...", "port": 3000 }'
+      exit 1
+    fi
+
+    # Detect cmd
+    if python3 -c "import json; d=json.load(open('$PKG')); exit(0 if 'dev' in d.get('scripts',{}) else 1)" 2>/dev/null; then
+      RUN_CMD="npm run dev"
+    elif python3 -c "import json; d=json.load(open('$PKG')); exit(0 if 'start' in d.get('scripts',{}) else 1)" 2>/dev/null; then
+      RUN_CMD="npm start"
+    else
+      err "No 'run.cmd' in taskbot.json and no 'dev' or 'start' script in package.json"
+      err 'Add to taskbot.json: "run": { "cmd": "...", "port": 3000 }'
+      exit 1
+    fi
+
+    # Detect port
+    DETECTED_PORT=$(python3 -c "
+import json, re, os
+pkg = '$PROJECT_DIR/package.json'
+if os.path.exists(pkg):
+    dev_cmd = json.load(open(pkg)).get('scripts', {}).get('dev', '')
+    m = re.search(r'-p\s+(\d+)', dev_cmd)
+    if m: print(m.group(1)); exit()
+env_file = '$PROJECT_DIR/.env'
+if os.path.exists(env_file):
+    for line in open(env_file):
+        m = re.match(r'^PORT=(\d+)', line)
+        if m: print(m.group(1)); exit()
+print('3000')
+" 2>/dev/null || echo "3000")
+
+    # Detect env_files
+    DETECTED_ENV_FILES_ARR=()
+    [ -f "$PROJECT_DIR/.env" ] && DETECTED_ENV_FILES_ARR+=('".env"')
+    [ -f "$PROJECT_DIR/.env.local" ] && DETECTED_ENV_FILES_ARR+=('".env.local"')
+    DETECTED_ENV_FILES="[$(IFS=,; echo "${DETECTED_ENV_FILES_ARR[*]}")]"
+
+    # Write detected config into taskbot.json (merge, don't overwrite other fields)
+    python3 - <<PYEOF
+import json, sys
+path = '$DOCS_DIR/taskbot.json'
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except Exception:
+    cfg = {}
+cfg['run'] = {
+    'cmd': '$RUN_CMD',
+    'port': int('$DETECTED_PORT'),
+    'env_files': json.loads('$DETECTED_ENV_FILES'),
+}
+with open(path, 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+PYEOF
+    log "Added default run config to docs/taskbot.json — edit if needed"
+
+    RUN_PORT="$DETECTED_PORT"
+    RUN_ENV_FILES=$(printf '%s\n' "${DETECTED_ENV_FILES_ARR[@]}" | tr -d '"')
+  fi
+
+  # Auto-detect port if not configured
+  if [ -z "$RUN_PORT" ]; then
+    RUN_PORT=$(python3 -c "
+import json, re, os
+pkg = '$PROJECT_DIR/package.json'
+if os.path.exists(pkg):
+    dev_cmd = json.load(open(pkg)).get('scripts', {}).get('dev', '')
+    m = re.search(r'-p\s+(\d+)', dev_cmd)
+    if m: print(m.group(1)); exit()
+env_file = '$PROJECT_DIR/.env'
+if os.path.exists(env_file):
+    for line in open(env_file):
+        m = re.match(r'^PORT=(\d+)', line)
+        if m: print(m.group(1)); exit()
+print('3000')
+" 2>/dev/null || echo "3000")
   fi
 
   # Find task slug across all stages
@@ -921,17 +1005,19 @@ else:
 PYEOF
 )
         log "Creating PR: $NEXT_BRANCH → $NEXT_MERGE_INTO"
-        PR_ARGS=(--base "$NEXT_MERGE_INTO" --head "$NEXT_BRANCH" --title "$PR_TITLE")
+        PR_ARGS=(--base "$NEXT_MERGE_INTO" --head "$NEXT_BRANCH" --title "$PR_TITLE" --fill)
         [ -n "$PR_REPO" ] && PR_ARGS=(--repo "$PR_REPO" "${PR_ARGS[@]}")
         [ -n "$PR_REVIEWER" ] && PR_ARGS=("${PR_ARGS[@]}" --reviewer "$PR_REVIEWER")
-        PR_URL=$(gh pr create "${PR_ARGS[@]}" 2>&1 | grep -E 'https?://' | tail -1 || true)
+        GH_OUTPUT=$(gh pr create "${PR_ARGS[@]}" 2>&1) || true
+        PR_URL=$(echo "$GH_OUTPUT" | grep -E 'https?://' | tail -1 || true)
         if [ -n "$PR_URL" ]; then
           set_pr_url "$NEXT_SLUG" "$PR_URL"
           mark_done "$NEXT_SLUG" "pr"
           ok "PR created: $PR_URL"
           ok "Next: taskbot.sh --promote $TARGET_INDEX"
         else
-          err "PR creation may have failed — check output above"
+          echo "$GH_OUTPUT"
+          err "PR creation failed"
           exit 1
         fi
       else
@@ -970,120 +1056,6 @@ fi
 mkdir -p "$DEV_DIR" "$LOG_DIR"
 
 # ── Find pending task docs ────────────────────────────────────────────
-find_tasks() {
-  find "$DOCS_DIR" -maxdepth 1 -name '[0-9]*-*.md' -printf '%f\n' | sort -n
-}
-
-find_task_by_index() {
-  local index="$1"
-  find "$DOCS_DIR" -maxdepth 1 -name "${index}-*.md" -printf '%f\n' | head -1
-}
-
-task_index() {
-  echo "$1" | grep -oP '^\d+'
-}
-
-# ── Workflow + state helpers ─────────────────────────────────────────
-
-read_workflow() {
-  local task_path="$1"
-  local dev_branch
-  dev_branch=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json'))['dev_branch'])" 2>/dev/null || echo "dev")
-  python3 - "$task_path" "$dev_branch" <<'PYEOF'
-import sys, re
-task_path, dev_b = sys.argv[1], sys.argv[2]
-task = open(task_path).read()
-m = re.search(r'## Workflow\n(.*?)(?=\n## |\Z)', task, re.DOTALL)
-if not m:
-    print(f'standard:code,pr:{dev_b}:{dev_b}')
-    sys.exit(0)
-section = m.group(1)
-def get(key, default):
-    r = re.search(r'^' + key + r':\s*(.+)$', section, re.MULTILINE)
-    return r.group(1).strip() if r else default
-preset = get('preset', 'standard')
-ops_map = {'instant': 'code,merge', 'standard': 'code,pr', 'thorough': 'code,review,run,pr'}
-operations = get('operations', ops_map.get(preset, 'code,pr'))
-branch_from = get('branch_from', dev_b)
-merge_into = get('merge_into', dev_b)
-print(f'{preset}:{operations}:{branch_from}:{merge_into}')
-PYEOF
-}
-
-init_state() {
-  local slug="$1" preset="$2" operations="$3" branch="$4" branch_from="$5" merge_into="$6"
-  mkdir -p "$STATE_DIR"
-  python3 - "$STATE_DIR/$slug.json" "$slug" "$preset" "$operations" "$branch" "$branch_from" "$merge_into" <<'PYEOF'
-import sys, json
-path, slug, preset, operations, branch, branch_from, merge_into = sys.argv[1:8]
-data = {
-    'slug': slug,
-    'preset': preset,
-    'branch': branch,
-    'branch_from': branch_from,
-    'merge_into': merge_into,
-    'operations': operations.split(','),
-    'completed': ['code'],
-    'pr_url': None,
-}
-json.dump(data, open(path, 'w'), indent=2)
-PYEOF
-}
-
-mark_done() {
-  local slug="$1" op="$2"
-  python3 - "$STATE_DIR/$slug.json" "$op" <<'PYEOF'
-import sys, json
-path, op = sys.argv[1], sys.argv[2]
-data = json.load(open(path))
-if op not in data['completed']:
-    data['completed'].append(op)
-json.dump(data, open(path, 'w'), indent=2)
-PYEOF
-}
-
-next_op() {
-  local slug="$1"
-  local state_file="$STATE_DIR/$slug.json"
-  if [ ! -f "$state_file" ]; then
-    echo "no_state"
-    return
-  fi
-  python3 - "$state_file" <<'PYEOF'
-import sys, json
-data = json.load(open(sys.argv[1]))
-ops = data.get('operations', [])
-done = data.get('completed', [])
-for op in ops:
-    if op not in done:
-        print(op)
-        exit()
-print('done')
-PYEOF
-}
-
-load_state_field() {
-  local slug="$1" field="$2"
-  local state_file="$STATE_DIR/$slug.json"
-  [ -f "$state_file" ] || { echo ""; return; }
-  python3 - "$state_file" "$field" <<'PYEOF'
-import sys, json
-data = json.load(open(sys.argv[1]))
-val = data.get(sys.argv[2], '')
-print(val if val is not None else '')
-PYEOF
-}
-
-set_pr_url() {
-  local slug="$1" url="$2"
-  python3 - "$STATE_DIR/$slug.json" "$url" <<'PYEOF'
-import sys, json
-path, url = sys.argv[1], sys.argv[2]
-data = json.load(open(path))
-data['pr_url'] = url
-json.dump(data, open(path, 'w'), indent=2)
-PYEOF
-}
 
 # ── Pre-flight checks ────────────────────────────────────────────────
 preflight() {
