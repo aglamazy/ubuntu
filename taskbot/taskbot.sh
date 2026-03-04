@@ -128,6 +128,82 @@ LOG_DIR="$PROJECT_DIR/task-logs"
 INSTRUCTIONS="$DOCS_DIR/AGENT_INSTRUCTIONS.md"
 STATE_DIR="$PROJECT_DIR/.taskbot-state"
 
+# ── Bare --run: start the project dev server (Next.js), no task needed ──
+if [ "$MODE" = "run" ] && [ -z "$TARGET_INDEX" ]; then
+  exec "$TASKBOT_HOME/run-dev.sh" "$PROJECT_DIR"
+fi
+
+# ── Versioned migration ───────────────────────────────────────────────
+TASKBOT_VERSION="$(cat "$TASKBOT_HOME/VERSION" 2>/dev/null | tr -d '[:space:]')"
+TASKBOT_VERSION="${TASKBOT_VERSION:-1}"
+
+migrate_project() {
+  local docs_dir="$1"
+  local project_dir="$2"
+
+  # Case 1: No taskbot.json but docs/ has task files → bootstrap
+  if [ ! -f "$docs_dir/taskbot.json" ] && [ -d "$docs_dir" ] && \
+     [ -n "$(find "$docs_dir" -maxdepth 2 -name '[0-9]*-*.md' 2>/dev/null | head -1)" ]; then
+    local _dev _prod _name
+    _dev=$(git -C "$project_dir" symbolic-ref --short HEAD 2>/dev/null || echo "dev")
+    _prod="main"
+    _name="$(basename "$project_dir")"
+    for _b in main master prod; do
+      if git -C "$project_dir" show-ref --verify --quiet "refs/heads/$_b" 2>/dev/null || \
+         git -C "$project_dir" show-ref --verify --quiet "refs/remotes/origin/$_b" 2>/dev/null; then
+        _prod="$_b"; break
+      fi
+    done
+    python3 -c "
+import json
+data = {
+  'project': '$_name',
+  'dev_branch': '$_dev',
+  'prod_branch': '$_prod',
+  'taskbot_version': $TASKBOT_VERSION
+}
+json.dump(data, open('$docs_dir/taskbot.json', 'w'), indent=2)
+print('[taskbot] Bootstrapped $docs_dir/taskbot.json (dev=$_dev, prod=$_prod)')
+"
+    # Copy AGENT_INSTRUCTIONS.md if missing
+    if [ ! -f "$docs_dir/AGENT_INSTRUCTIONS.md" ] && [ -f "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" ]; then
+      cp "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" "$docs_dir/AGENT_INSTRUCTIONS.md"
+      log "Copied AGENT_INSTRUCTIONS.md to $docs_dir/"
+    fi
+    return
+  fi
+
+  # Case 2: taskbot.json exists but taskbot_version is missing or outdated
+  if [ -f "$docs_dir/taskbot.json" ]; then
+    local file_version
+    file_version=$(python3 -c "
+import json, sys
+try:
+  d = json.load(open('$docs_dir/taskbot.json'))
+  print(d.get('taskbot_version', 0))
+except Exception:
+  print(0)
+")
+    if [ "$file_version" -lt "$TASKBOT_VERSION" ] 2>/dev/null; then
+      python3 -c "
+import json
+path = '$docs_dir/taskbot.json'
+d = json.load(open(path))
+d['taskbot_version'] = $TASKBOT_VERSION
+json.dump(d, open(path, 'w'), indent=2)
+print('[taskbot] Migrated $docs_dir/taskbot.json to version $TASKBOT_VERSION')
+"
+      # Copy AGENT_INSTRUCTIONS.md if missing
+      if [ ! -f "$docs_dir/AGENT_INSTRUCTIONS.md" ] && [ -f "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" ]; then
+        cp "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" "$docs_dir/AGENT_INSTRUCTIONS.md"
+        log "Copied AGENT_INSTRUCTIONS.md to $docs_dir/"
+      fi
+    fi
+  fi
+}
+
+migrate_project "$DOCS_DIR" "$PROJECT_DIR"
+
 # ── Auto-detect sub-project if not a configured project ─────────────
 if [ ! -f "$DOCS_DIR/taskbot.json" ]; then
   # Scan for configured sub-projects
