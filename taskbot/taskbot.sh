@@ -69,6 +69,7 @@ for arg in "$@"; do
     --list)      MODE="list" ;;
     --configure) MODE="configure" ;;
     --new)       MODE="new" ;;
+    --idea)      MODE="idea" ;;
     --promote)   MODE="promote" ;;
     --abort)     MODE="abort" ;;
     --run)       MODE="run" ;;
@@ -86,6 +87,7 @@ for arg in "$@"; do
       echo "  --list         Show tasks needing attention (pending + on dev)"
       echo "  --configure    Set up taskbot for this project (interactive)"
       echo "  --new          Create a new task (interactive interview)"
+  echo "  --idea         Capture a one-line task placeholder instantly"
       echo "  --promote <n>  Create PR, wait for merge, test on prod, move to done"
       echo "  --close <n>    Create dev→prod PR, wait for merge, move task to done"
       echo "  --abort <n>    Move task to aborted, clean up worktree"
@@ -141,6 +143,21 @@ migrate_project() {
   local docs_dir="$1"
   local project_dir="$2"
 
+  _migrate_assets() {
+    local docs_dir="$1" project_dir="$2"
+    # Copy AGENT_INSTRUCTIONS.md if missing
+    if [ ! -f "$docs_dir/AGENT_INSTRUCTIONS.md" ] && [ -f "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" ]; then
+      cp "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" "$docs_dir/AGENT_INSTRUCTIONS.md"
+      log "Copied AGENT_INSTRUCTIONS.md to $docs_dir/"
+    fi
+    # Add .taskbot-state to .gitignore if missing
+    local gitignore="$project_dir/.gitignore"
+    if ! grep -qsF '.taskbot-state' "$gitignore"; then
+      echo '.taskbot-state' >> "$gitignore"
+      log "Added .taskbot-state to $project_dir/.gitignore"
+    fi
+  }
+
   # Case 1: No taskbot.json but docs/ has task files → bootstrap
   if [ ! -f "$docs_dir/taskbot.json" ] && [ -d "$docs_dir" ] && \
      [ -n "$(find "$docs_dir" -maxdepth 2 -name '[0-9]*-*.md' 2>/dev/null | head -1)" ]; then
@@ -165,11 +182,7 @@ data = {
 json.dump(data, open('$docs_dir/taskbot.json', 'w'), indent=2)
 print('[taskbot] Bootstrapped $docs_dir/taskbot.json (dev=$_dev, prod=$_prod)')
 "
-    # Copy AGENT_INSTRUCTIONS.md if missing
-    if [ ! -f "$docs_dir/AGENT_INSTRUCTIONS.md" ] && [ -f "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" ]; then
-      cp "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" "$docs_dir/AGENT_INSTRUCTIONS.md"
-      log "Copied AGENT_INSTRUCTIONS.md to $docs_dir/"
-    fi
+    _migrate_assets "$docs_dir" "$project_dir"
     return
   fi
 
@@ -193,11 +206,7 @@ d['taskbot_version'] = $TASKBOT_VERSION
 json.dump(d, open(path, 'w'), indent=2)
 print('[taskbot] Migrated $docs_dir/taskbot.json to version $TASKBOT_VERSION')
 "
-      # Copy AGENT_INSTRUCTIONS.md if missing
-      if [ ! -f "$docs_dir/AGENT_INSTRUCTIONS.md" ] && [ -f "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" ]; then
-        cp "$TASKBOT_HOME/AGENT_INSTRUCTIONS.md" "$docs_dir/AGENT_INSTRUCTIONS.md"
-        log "Copied AGENT_INSTRUCTIONS.md to $docs_dir/"
-      fi
+      _migrate_assets "$docs_dir" "$project_dir"
     fi
   fi
 }
@@ -287,6 +296,30 @@ fi
 # ── New task mode ────────────────────────────────────────────────────
 if [ "$MODE" = "new" ]; then
   exec "$TASKBOT_HOME/new-task.sh" "$PROJECT_DIR"
+fi
+
+# ── Idea mode — one-line placeholder task ────────────────────────────
+if [ "$MODE" = "idea" ]; then
+  LAST_INDEX=$(find "$DOCS_DIR" "$DOCS_DIR/dev" "$DOCS_DIR/done" -maxdepth 1 \
+    -name '[0-9]*-*.md' -printf '%f\n' 2>/dev/null \
+    | grep -oP '^\d+' | sort -n | tail -1 || true)
+  NEXT_INDEX=$(( ${LAST_INDEX:-0} + 1 ))
+
+  printf "Idea: "
+  read -r IDEA_TITLE
+
+  if [ -z "$IDEA_TITLE" ]; then
+    err "No title given."
+    exit 1
+  fi
+
+  # Slugify: lowercase, spaces→hyphens, strip non-alphanumeric except hyphens
+  IDEA_SLUG=$(echo "$IDEA_TITLE" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
+  IDEA_FILE="$DOCS_DIR/${NEXT_INDEX}-${IDEA_SLUG}.md"
+
+  printf '# %s\n' "$IDEA_TITLE" > "$IDEA_FILE"
+  ok "Created: docs/${NEXT_INDEX}-${IDEA_SLUG}.md"
+  exit 0
 fi
 
 # ── Abort mode ──────────────────────────────────────────────────────
