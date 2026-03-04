@@ -72,6 +72,7 @@ for arg in "$@"; do
     --idea)      MODE="idea" ;;
     --promote)   MODE="promote" ;;
     --abort)     MODE="abort" ;;
+    --done)      MODE="done" ;;
     --run)       MODE="run" ;;
     --close)     MODE="close" ;;
     --review)    MODE="review" ;;
@@ -90,6 +91,7 @@ for arg in "$@"; do
   echo "  --idea         Capture a one-line task placeholder instantly"
       echo "  --promote <n>  Create PR, wait for merge, test on prod, move to done"
       echo "  --close <n>    Create dev→prod PR, wait for merge, move task to done"
+      echo "  --done <n>     Mark a task as done (already merged manually)"
       echo "  --abort <n>    Move task to aborted, clean up worktree"
       echo "  --run <n>      Run the worktree locally (links .env + node_modules, kills previous)"
       echo "  --review <n>   Run agent code review pass on task worktree"
@@ -100,6 +102,7 @@ for arg in "$@"; do
       TARGET_INDEX="$arg"
       # Don't override MODE if --promote/--close/--abort/--run/--review/--next was already set
       [ "$MODE" = "promote" ] || [ "$MODE" = "close" ] || [ "$MODE" = "abort" ] || \
+      [ "$MODE" = "done" ] || \
       [ "$MODE" = "run" ] || [ "$MODE" = "review" ] || [ "$MODE" = "auto_next" ] || \
       MODE="specific"
       ;;
@@ -319,6 +322,25 @@ if [ "$MODE" = "idea" ]; then
 
   printf '# %s\n' "$IDEA_TITLE" > "$IDEA_FILE"
   ok "Created: docs/${NEXT_INDEX}-${IDEA_SLUG}.md"
+  exit 0
+fi
+
+# ── Done mode — mark a manually-merged task as done ─────────────────
+if [ "$MODE" = "done" ]; then
+  if [ -z "$TARGET_INDEX" ]; then
+    err "Done requires a task index: $0 --done <number>"
+    exit 1
+  fi
+  DONE_TASK=$(find "$DEV_DIR" "$DOCS_DIR" -maxdepth 1 -name "${TARGET_INDEX}-*.md" -printf '%f\n' 2>/dev/null | head -1)
+  if [ -z "$DONE_TASK" ]; then
+    err "No task with index $TARGET_INDEX found in docs/ or docs/dev/"
+    exit 1
+  fi
+  DONE_SRC=$(find "$DEV_DIR" "$DOCS_DIR" -maxdepth 1 -name "${TARGET_INDEX}-*.md" 2>/dev/null | head -1)
+  mkdir -p "$DOCS_DIR/done"
+  mv "$DONE_SRC" "$DOCS_DIR/done/$DONE_TASK"
+  rm -f "$STATE_DIR/${DONE_TASK%.md}.json"
+  ok "Done: $DONE_TASK → docs/done/"
   exit 0
 fi
 
