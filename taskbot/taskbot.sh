@@ -71,6 +71,10 @@ for arg in "$@"; do
     --new)       MODE="new" ;;
     --promote)   MODE="promote" ;;
     --abort)     MODE="abort" ;;
+    --run)       MODE="run" ;;
+    --close)     MODE="close" ;;
+    --review)    MODE="review" ;;
+    --next)      MODE="auto_next" ;;
     -h|--help)
       echo "Usage: $0 [project-dir] [task-number] [--all] [--dry-run] [--configure] [--new] [--promote <n>]"
       echo ""
@@ -83,13 +87,19 @@ for arg in "$@"; do
       echo "  --configure    Set up taskbot for this project (interactive)"
       echo "  --new          Create a new task (interactive interview)"
       echo "  --promote <n>  Create PR, wait for merge, test on prod, move to done"
+      echo "  --close <n>    Create dev→prod PR, wait for merge, move task to done"
       echo "  --abort <n>    Move task to aborted, clean up worktree"
+      echo "  --run <n>      Run the worktree locally (links .env + node_modules, kills previous)"
+      echo "  --review <n>   Run agent code review pass on task worktree"
+      echo "  --next <n>     Advance to the next pending workflow operation"
       exit 0
       ;;
     [0-9]*)
       TARGET_INDEX="$arg"
-      # Don't override MODE if --promote/--abort was already set
-      [ "$MODE" = "promote" ] || [ "$MODE" = "abort" ] || MODE="specific"
+      # Don't override MODE if --promote/--close/--abort/--run/--review/--next was already set
+      [ "$MODE" = "promote" ] || [ "$MODE" = "close" ] || [ "$MODE" = "abort" ] || \
+      [ "$MODE" = "run" ] || [ "$MODE" = "review" ] || [ "$MODE" = "auto_next" ] || \
+      MODE="specific"
       ;;
     *)
       if [ -z "$PROJECT_DIR" ]; then
@@ -116,36 +126,71 @@ DOCS_DIR="$PROJECT_DIR/docs"
 DEV_DIR="$DOCS_DIR/dev"
 LOG_DIR="$PROJECT_DIR/task-logs"
 INSTRUCTIONS="$DOCS_DIR/AGENT_INSTRUCTIONS.md"
+STATE_DIR="$PROJECT_DIR/.taskbot-state"
 
 # ── Auto-detect sub-project if not a configured project ─────────────
 if [ ! -f "$DOCS_DIR/taskbot.json" ]; then
   # Scan for configured sub-projects
   subs=()
-  for sub in "$PROJECT_DIR"/*/docs/taskbot.json; do
-    [ -f "$sub" ] || continue
-    subs+=("$(dirname "$(dirname "$sub")")")
-  done
+  if [ "$MODE" = "list" ] || [ "$MODE" = "dry" ]; then
+    # Recurse deeply for list/dry — find all projects under this directory
+    # Collect all candidate project dirs (excluding CI agent workspaces)
+    _all_subs=()
+    while IFS= read -r sub; do
+      _all_subs+=("$(realpath "$(dirname "$(dirname "$sub")")")")
+    done < <(find "$PROJECT_DIR" \
+      -name 'taskbot.json' -path '*/docs/taskbot.json' \
+      -not -path '*/.git/*' \
+      -not -path '*/node_modules/*' \
+      -not -path '*/.taskbot-worktrees/*' \
+      -not -path '*/_work/*' \
+      | sort)
+    # Keep only top-level projects (drop nested), then deduplicate by project name
+    declare -A _seen_names
+    for _p in "${_all_subs[@]}"; do
+      _nested=0
+      for _q in "${_all_subs[@]}"; do
+        [ "$_p" = "$_q" ] && continue
+        [[ "$_p" == "$_q/"* ]] && { _nested=1; break; }
+      done
+      if [ $_nested -eq 0 ]; then
+        _name="$(basename "$_p")"
+        if [ -z "${_seen_names[$_name]+x}" ]; then
+          _seen_names[$_name]=1
+          subs+=("$_p")
+        fi
+      fi
+    done
+    unset _all_subs _nested _p _q _name _seen_names
+  else
+    for sub in "$PROJECT_DIR"/*/docs/taskbot.json; do
+      [ -f "$sub" ] || continue
+      subs+=("$(dirname "$(dirname "$sub")")")
+    done
+  fi
 
-  if [ ${#subs[@]} -eq 1 ]; then
+  if [ ${#subs[@]} -ge 1 ] && ([ "$MODE" = "list" ] || [ "$MODE" = "dry" ]); then
+    # For list/dry-run from a parent dir, always iterate all found projects
+    _scan_root="$(realpath "$PROJECT_DIR")"
+    for s in "${subs[@]}"; do
+      echo ""
+      _label="${s#"$_scan_root/"}"
+      echo "━━━ $_label ━━━"
+      _flag="--$MODE"
+      [ "$MODE" = "dry" ] && _flag="--dry-run"
+      "$0" "$s" "$_flag" 2>&1 || true
+    done
+    exit 0
+  elif [ ${#subs[@]} -eq 1 ]; then
     PROJECT_DIR="${subs[0]}"
     PROJECT_NAME="$(basename "$PROJECT_DIR")"
     DOCS_DIR="$PROJECT_DIR/docs"
     DEV_DIR="$DOCS_DIR/dev"
     LOG_DIR="$PROJECT_DIR/task-logs"
     INSTRUCTIONS="$DOCS_DIR/AGENT_INSTRUCTIONS.md"
+    STATE_DIR="$PROJECT_DIR/.taskbot-state"
     log "Auto-detected project: $PROJECT_NAME"
   elif [ ${#subs[@]} -gt 1 ]; then
-    # For list/dry-run, scan all sub-projects
-    if [ "$MODE" = "list" ] || [ "$MODE" = "dry" ]; then
-      for s in "${subs[@]}"; do
-        echo ""
-        echo "━━━ $(basename "$s") ━━━"
-        _flag="--$MODE"
-        [ "$MODE" = "dry" ] && _flag="--dry-run"
-        "$0" "$s" "$_flag" 2>&1
-      done
-      exit 0
-    fi
     err "Multiple projects found. Specify which one:"
     for s in "${subs[@]}"; do
       echo "  $0 $s $*"
@@ -230,6 +275,7 @@ print(json.dumps(repos))
   # Move task to aborted
   mv "$ABORT_SOURCE/$ABORT_TASK" "$ABORTED_DIR/$ABORT_TASK"
   ok "Moved $ABORT_TASK → docs/aborted/"
+  rm -f "$STATE_DIR/$SLUG.json"
   exit 0
 fi
 
@@ -255,8 +301,17 @@ if [ "$MODE" = "promote" ]; then
   fi
 
   PROMOTE_TASK_PATH="$DEV_DIR/$PROMOTE_TASK"
+  PROMOTE_SLUG="${PROMOTE_TASK%.md}"
   DONE_DIR="$DOCS_DIR/done"
   mkdir -p "$DONE_DIR" "$LOG_DIR"
+
+  # Build state context for agent
+  if [ -f "$STATE_DIR/$PROMOTE_SLUG.json" ]; then
+    PROMOTE_STATE_CTX="State file: $(cat "$STATE_DIR/$PROMOTE_SLUG.json")
+If pr_url is non-null in the state, skip Step 2.5 (PR already created). Branch is in state.branch."
+  else
+    PROMOTE_STATE_CTX="No state file. Assume feature→dev PR already created. Skip Step 2.5."
+  fi
 
   TIMESTAMP=$(date +%Y%m%d-%H%M%S)
   PROMOTE_LOG="$LOG_DIR/${TARGET_INDEX}-promote-${TIMESTAMP}.log"
@@ -275,7 +330,8 @@ if [ "$MODE" = "promote" ]; then
       --model opus \
       --verbose \
       --output-format stream-json \
-      "Read ${PROMOTE_INSTRUCTIONS} for how to execute, then read ${PROMOTE_TASK_PATH} for the task. Execute it." \
+      "${PROMOTE_STATE_CTX}
+Read ${PROMOTE_INSTRUCTIONS} for how to execute, then read ${PROMOTE_TASK_PATH} for the task. Execute it." \
       2>&1 | tee "$PROMOTE_LOG.raw" | \
       python3 -u "$STREAM_FILTER" | tee "$PROMOTE_LOG"
   ) &
@@ -293,6 +349,36 @@ if [ "$MODE" = "promote" ]; then
     ok "Task $PROMOTE_TASK promoted successfully"
     mv "$PROMOTE_TASK_PATH" "$DONE_DIR/$PROMOTE_TASK"
     ok "Moved $PROMOTE_TASK → docs/done/"
+
+    # Clean up worktrees + branches + state file
+    PROMOTE_BRANCH=$(load_state_field "$PROMOTE_SLUG" "branch")
+    [ -z "$PROMOTE_BRANCH" ] && PROMOTE_BRANCH="taskbot/$PROMOTE_SLUG"
+    PROMOTE_WORKTREE="$PROJECT_DIR/.taskbot-worktrees/${PROMOTE_SLUG}"
+    cd "$PROJECT_DIR"
+    if [ -d "$PROMOTE_WORKTREE" ]; then
+      git worktree remove --force "$PROMOTE_WORKTREE" 2>/dev/null || true
+      ok "Removed worktree: $PROMOTE_WORKTREE"
+    fi
+    git branch -d "$PROMOTE_BRANCH" 2>/dev/null || true
+
+    # Clean up sibling worktrees
+    PROMOTE_REPOS_JSON=$(python3 -c "import json; print(__import__('json').dumps(json.load(open('$DOCS_DIR/taskbot.json')).get('repos', {})))" 2>/dev/null || echo "{}")
+    if [ "$PROMOTE_REPOS_JSON" != "{}" ]; then
+      for repo_rel in $(python3 -c "import json; [print(v) for v in json.loads('$PROMOTE_REPOS_JSON').values()]"); do
+        repo_abs=$(realpath "$PROJECT_DIR/$repo_rel" 2>/dev/null) || continue
+        [ -d "$repo_abs/.git" ] || continue
+        [ "$repo_abs" = "$PROJECT_DIR" ] && continue
+        sibling_wt="$repo_abs/.taskbot-worktrees/${PROMOTE_SLUG}"
+        if [ -d "$sibling_wt" ]; then
+          cd "$repo_abs"
+          git worktree remove --force "$sibling_wt" 2>/dev/null || true
+          ok "Removed sibling worktree: $sibling_wt"
+        fi
+        cd "$repo_abs" && git branch -d "$PROMOTE_BRANCH" 2>/dev/null || true
+      done
+    fi
+
+    rm -f "$STATE_DIR/$PROMOTE_SLUG.json"
   else
     warn "Promote may have failed — check log: $PROMOTE_LOG"
     exit 1
@@ -301,8 +387,449 @@ if [ "$MODE" = "promote" ]; then
   exit 0
 fi
 
+# ── Close mode ──────────────────────────────────────────────────────
+# Lightweight dev→prod PR + wait for merge + move to done.
+# Used after a feature branch is already merged into dev by anyone.
+if [ "$MODE" = "close" ]; then
+  if [ -z "$TARGET_INDEX" ]; then
+    err "Close requires a task index: $0 --close <number>"
+    exit 1
+  fi
+
+  # Find the task in docs/dev/
+  CLOSE_TASK=$(find "$DEV_DIR" -maxdepth 1 -name "${TARGET_INDEX}-*.md" -printf '%f\n' | head -1)
+  if [ -z "$CLOSE_TASK" ]; then
+    err "No task with index $TARGET_INDEX found in docs/dev/"
+    err "Only tasks on dev can be closed. Current dev tasks:"
+    find "$DEV_DIR" -maxdepth 1 -name '[0-9]*-*.md' -printf '  %f\n' 2>/dev/null | sort -n
+    exit 1
+  fi
+
+  CLOSE_TASK_PATH="$DEV_DIR/$CLOSE_TASK"
+  CLOSE_SLUG="${CLOSE_TASK%.md}"
+  DONE_DIR="$DOCS_DIR/done"
+  mkdir -p "$DONE_DIR"
+
+  # Read config
+  CLOSE_DEV_BRANCH=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json'))['dev_branch'])" 2>/dev/null || echo "dev")
+  CLOSE_PROD_BRANCH=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json'))['prod_branch'])" 2>/dev/null || echo "main")
+  CLOSE_PR_METHOD=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('pr', {}).get('create_method', 'gh_cli'))" 2>/dev/null || echo "gh_cli")
+  CLOSE_PR_REPO=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('pr', {}).get('repo', ''))" 2>/dev/null || echo "")
+  CLOSE_PR_REVIEWER=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('pr', {}).get('reviewer', ''))" 2>/dev/null || echo "")
+
+  if [ "$CLOSE_PR_METHOD" != "gh_cli" ]; then
+    warn "PR method is '$CLOSE_PR_METHOD' — create the dev→prod PR manually:"
+    warn "  $CLOSE_DEV_BRANCH → $CLOSE_PROD_BRANCH"
+    warn "When merged, move the task to done:"
+    warn "  mv '$CLOSE_TASK_PATH' '$DONE_DIR/$CLOSE_TASK'"
+    warn "  rm -f '$STATE_DIR/$CLOSE_SLUG.json'"
+    exit 0
+  fi
+
+  # Build PR title from task doc ## Problem first line
+  CLOSE_PR_TITLE=$(python3 - "$CLOSE_TASK_PATH" <<'PYEOF'
+import sys, re, os
+task = open(sys.argv[1]).read()
+m = re.search(r'^## Problem\n(.+?)(?:\n|$)', task, re.MULTILINE)
+if m:
+    print(m.group(1).strip()[:72])
+else:
+    fname = os.path.basename(sys.argv[1]).replace('.md', '').replace('-', ' ')
+    print(fname[:72])
+PYEOF
+)
+
+  log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log "Close: $CLOSE_TASK"
+  log "PR:    $CLOSE_DEV_BRANCH → $CLOSE_PROD_BRANCH"
+  log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  cd "$PROJECT_DIR"
+  CLOSE_PR_ARGS=(--base "$CLOSE_PROD_BRANCH" --head "$CLOSE_DEV_BRANCH" --title "$CLOSE_PR_TITLE")
+  [ -n "$CLOSE_PR_REPO" ] && CLOSE_PR_ARGS=(--repo "$CLOSE_PR_REPO" "${CLOSE_PR_ARGS[@]}")
+  [ -n "$CLOSE_PR_REVIEWER" ] && CLOSE_PR_ARGS=("${CLOSE_PR_ARGS[@]}" --reviewer "$CLOSE_PR_REVIEWER")
+
+  CLOSE_PR_URL=$(gh pr create "${CLOSE_PR_ARGS[@]}" 2>&1 | grep -E 'https?://' | tail -1 || true)
+  if [ -z "$CLOSE_PR_URL" ]; then
+    err "PR creation may have failed — check output above"
+    err "If a PR already exists, wait for merge and then run:"
+    err "  mv '$CLOSE_TASK_PATH' '$DONE_DIR/$CLOSE_TASK'"
+    err "  rm -f '$STATE_DIR/$CLOSE_SLUG.json'"
+    exit 1
+  fi
+
+  ok "PR created: $CLOSE_PR_URL"
+  log "Polling for merge (every 60s, up to 30m)..."
+
+  CLOSE_DEADLINE=$(( $(date +%s) + 1800 ))
+  while true; do
+    if [ "$(date +%s)" -ge "$CLOSE_DEADLINE" ]; then
+      warn "Timed out waiting for PR to merge after 30m"
+      warn "When merged, move the task to done:"
+      warn "  mv '$CLOSE_TASK_PATH' '$DONE_DIR/$CLOSE_TASK'"
+      warn "  rm -f '$STATE_DIR/$CLOSE_SLUG.json'"
+      exit 1
+    fi
+
+    CLOSE_PR_STATE=$(gh pr view "$CLOSE_PR_URL" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+    if [ "$CLOSE_PR_STATE" = "MERGED" ]; then
+      ok "PR merged!"
+      mv "$CLOSE_TASK_PATH" "$DONE_DIR/$CLOSE_TASK"
+      ok "Moved $CLOSE_TASK → docs/done/"
+      rm -f "$STATE_DIR/$CLOSE_SLUG.json"
+      exit 0
+    elif [ "$CLOSE_PR_STATE" = "CLOSED" ]; then
+      err "PR was closed without merging: $CLOSE_PR_URL"
+      exit 1
+    fi
+
+    log "PR state: $CLOSE_PR_STATE — waiting 60s..."
+    sleep 60
+  done
+fi
+
+# ── Run mode ────────────────────────────────────────────────────────
+if [ "$MODE" = "run" ]; then
+  if [ -z "$TARGET_INDEX" ]; then
+    err "Run requires a task index: $0 --run <number>"
+    exit 1
+  fi
+
+  # Read run config
+  RUN_CMD=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('run', {}).get('cmd', ''))" 2>/dev/null || true)
+  RUN_PORT=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('run', {}).get('port', ''))" 2>/dev/null || true)
+  RUN_ENV_FILES=$(python3 -c "import json; [print(f) for f in json.load(open('$DOCS_DIR/taskbot.json')).get('run', {}).get('env_files', ['.env'])]" 2>/dev/null || echo ".env")
+
+  if [ -z "$RUN_CMD" ]; then
+    err "No 'run.cmd' configured in $DOCS_DIR/taskbot.json"
+    err 'Add: "run": { "cmd": "npm run dev", "port": 3000, "env_files": [".env"] }'
+    exit 1
+  fi
+
+  # Find task slug across all stages
+  RUN_TASK=""
+  for search_dir in "$DOCS_DIR" "$DEV_DIR" "$DOCS_DIR/done"; do
+    found=$(find "$search_dir" -maxdepth 1 -name "${TARGET_INDEX}-*.md" -printf '%f\n' 2>/dev/null | head -1)
+    if [ -n "$found" ]; then
+      RUN_TASK="$found"
+      break
+    fi
+  done
+
+  if [ -z "$RUN_TASK" ]; then
+    err "No task with index $TARGET_INDEX found"
+    exit 1
+  fi
+
+  SLUG="${RUN_TASK%.md}"
+  BRANCH="taskbot/${SLUG}"
+  WORKTREE_DIR="$PROJECT_DIR/.taskbot-worktrees/${SLUG}"
+  RUN_LOG="$PROJECT_DIR/run.log"
+  PID_FILE="$PROJECT_DIR/.taskbot-run.pid"
+
+  if [ ! -d "$WORKTREE_DIR" ]; then
+    # Check if branch still exists (local or remote) and recreate worktree
+    LOCAL_BRANCH=$(git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null && echo "yes" || true)
+    REMOTE_BRANCH=$(git -C "$PROJECT_DIR" ls-remote --heads origin "$BRANCH" 2>/dev/null | head -1)
+
+    if [ -n "$LOCAL_BRANCH" ] || [ -n "$REMOTE_BRANCH" ]; then
+      log "Worktree gone but branch exists — recreating..."
+      cd "$PROJECT_DIR"
+      [ -z "$LOCAL_BRANCH" ] && git fetch origin "$BRANCH":"$BRANCH" 2>/dev/null
+      mkdir -p "$(dirname "$WORKTREE_DIR")"
+      git worktree add "$WORKTREE_DIR" "$BRANCH"
+    else
+      DEV_BRANCH=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json'))['dev_branch'])" 2>/dev/null || echo "dev")
+      err "No worktree or branch found for task $TARGET_INDEX"
+      err "Branch '$BRANCH' is gone — likely already merged into $DEV_BRANCH"
+      err "To run the merged code: check out $DEV_BRANCH and run normally"
+      exit 1
+    fi
+  fi
+
+  # Kill previous instance
+  if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE")
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+      log "Killing previous run (PID: $OLD_PID)..."
+      kill_descendants "$OLD_PID"
+      kill "$OLD_PID" 2>/dev/null || true
+      sleep 1
+    fi
+    rm -f "$PID_FILE"
+  fi
+
+  # Kill anything still holding the port
+  if [ -n "$RUN_PORT" ]; then
+    EXISTING=$(lsof -ti:"$RUN_PORT" 2>/dev/null || true)
+    if [ -n "$EXISTING" ]; then
+      log "Killing process on port $RUN_PORT (PID: $EXISTING)..."
+      kill -9 $EXISTING 2>/dev/null || true
+      sleep 0.5
+    fi
+  fi
+
+  # Setup a single repo worktree: link .env files + node_modules
+  setup_run_env() {
+    local wt_dir="$1"
+    local src_dir="$2"
+
+    # Symlink each env file
+    while IFS= read -r env_file; do
+      [ -z "$env_file" ] && continue
+      local src="$src_dir/$env_file"
+      local dst="$wt_dir/$env_file"
+      if [ -f "$src" ]; then
+        ln -sfn "$src" "$dst"
+        log "Linked $env_file ($(basename "$src_dir"))"
+      else
+        warn "Env file not found: $src"
+      fi
+    done <<< "$RUN_ENV_FILES"
+
+    # node_modules: symlink if package.json unchanged, else npm install
+    if [ -f "$wt_dir/package.json" ]; then
+      local main_nm="$src_dir/node_modules"
+      local wt_nm="$wt_dir/node_modules"
+      if [ -d "$main_nm" ] && diff -q "$src_dir/package.json" "$wt_dir/package.json" &>/dev/null; then
+        ln -sfn "$main_nm" "$wt_nm"
+        log "Linked node_modules ($(basename "$src_dir")) — package.json unchanged"
+      else
+        log "Running npm install in $(basename "$wt_dir")..."
+        (cd "$wt_dir" && npm install)
+      fi
+    fi
+  }
+
+  setup_run_env "$WORKTREE_DIR" "$PROJECT_DIR"
+
+  # Setup sibling repo worktrees
+  REPOS_JSON=$(python3 -c "
+import json
+cfg = json.load(open('$DOCS_DIR/taskbot.json'))
+print(json.dumps(cfg.get('repos', {})))" 2>/dev/null || echo "{}")
+  if [ "$REPOS_JSON" != "{}" ]; then
+    for repo_rel in $(python3 -c "import json; [print(v) for v in json.loads('$REPOS_JSON').values()]"); do
+      repo_abs=$(realpath "$PROJECT_DIR/$repo_rel" 2>/dev/null) || continue
+      [ -d "$repo_abs/.git" ] || continue
+      [ "$repo_abs" = "$PROJECT_DIR" ] && continue
+      sibling_wt="$repo_abs/.taskbot-worktrees/${SLUG}"
+      [ -d "$sibling_wt" ] && setup_run_env "$sibling_wt" "$repo_abs"
+    done
+  fi
+
+  log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log "Run:      task $TARGET_INDEX ($SLUG)"
+  log "Worktree: $WORKTREE_DIR"
+  log "Command:  $RUN_CMD"
+  log "Log:      $RUN_LOG"
+  log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Run in foreground, tee to run.log with ANSI stripped
+  cd "$WORKTREE_DIR"
+  script -q -e -c "$RUN_CMD" /dev/null \
+    2>&1 | tee >(sed -u -r 's/\x1B\[[0-9;]*[ -/]*[@-~]//g' > "$RUN_LOG") &
+  RUN_PID=$!
+  echo "$RUN_PID" > "$PID_FILE"
+
+  wait "$RUN_PID" || true
+  rm -f "$PID_FILE"
+  exit 0
+fi
+
+# ── Review mode ─────────────────────────────────────────────────────
+if [ "$MODE" = "review" ]; then
+  if [ -z "$TARGET_INDEX" ]; then
+    err "Review requires a task index: $0 --review <number>"
+    exit 1
+  fi
+
+  REVIEW_INSTRUCTIONS="$TASKBOT_HOME/REVIEW_INSTRUCTIONS.md"
+  if [ ! -f "$REVIEW_INSTRUCTIONS" ]; then
+    err "REVIEW_INSTRUCTIONS.md not found in $TASKBOT_HOME"
+    exit 1
+  fi
+
+  # Find task in docs/dev/
+  REVIEW_TASK=$(find "$DEV_DIR" -maxdepth 1 -name "${TARGET_INDEX}-*.md" -printf '%f\n' | head -1)
+  if [ -z "$REVIEW_TASK" ]; then
+    err "No task with index $TARGET_INDEX found in docs/dev/"
+    exit 1
+  fi
+
+  REVIEW_TASK_PATH="$DEV_DIR/$REVIEW_TASK"
+  REVIEW_SLUG="${REVIEW_TASK%.md}"
+  REVIEW_BRANCH="taskbot/${REVIEW_SLUG}"
+  REVIEW_WORKTREE="$PROJECT_DIR/.taskbot-worktrees/${REVIEW_SLUG}"
+
+  # Recreate worktree if needed (same fallback as --run)
+  if [ ! -d "$REVIEW_WORKTREE" ]; then
+    LOCAL_BRANCH=$(git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/heads/$REVIEW_BRANCH" 2>/dev/null && echo "yes" || true)
+    REMOTE_BRANCH=$(git -C "$PROJECT_DIR" ls-remote --heads origin "$REVIEW_BRANCH" 2>/dev/null | head -1)
+    if [ -n "$LOCAL_BRANCH" ] || [ -n "$REMOTE_BRANCH" ]; then
+      log "Worktree gone but branch exists — recreating..."
+      cd "$PROJECT_DIR"
+      [ -z "$LOCAL_BRANCH" ] && git fetch origin "$REVIEW_BRANCH":"$REVIEW_BRANCH" 2>/dev/null
+      mkdir -p "$(dirname "$REVIEW_WORKTREE")"
+      git worktree add "$REVIEW_WORKTREE" "$REVIEW_BRANCH"
+    else
+      err "No worktree or branch found for task $TARGET_INDEX"
+      exit 1
+    fi
+  fi
+
+  mkdir -p "$LOG_DIR"
+  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+  REVIEW_LOG="$LOG_DIR/${TARGET_INDEX}-review-${TIMESTAMP}.log"
+
+  log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  log "Review:   $REVIEW_TASK"
+  log "Worktree: $REVIEW_WORKTREE"
+  log "Log:      $REVIEW_LOG"
+  log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  REVIEW_EXIT=0
+  (
+    cd "$REVIEW_WORKTREE"
+    claude -p \
+      --permission-mode bypassPermissions \
+      --model opus \
+      --verbose \
+      --output-format stream-json \
+      "Read ${REVIEW_INSTRUCTIONS} for how to execute, then read ${REVIEW_TASK_PATH} for the task. Execute the review." \
+      2>&1 | tee "$REVIEW_LOG.raw" | \
+      python3 -u "$STREAM_FILTER" | tee "$REVIEW_LOG"
+  ) &
+  CHILD_PID=$!
+  wait "$CHILD_PID" || REVIEW_EXIT=$?
+  CHILD_PID=""
+
+  if [ $REVIEW_EXIT -ne 0 ]; then
+    err "Claude exited with code $REVIEW_EXIT"
+    err "See log: $REVIEW_LOG"
+    exit 1
+  fi
+
+  if tail -20 "$REVIEW_LOG" | grep -qi "SUCCESS"; then
+    mark_done "$REVIEW_SLUG" "review"
+    ok "Review complete"
+    next=$(next_op "$REVIEW_SLUG")
+    case "$next" in
+      run)  ok "Next: taskbot.sh --next $TARGET_INDEX  (run local tests, then --next again for PR)" ;;
+      pr)   ok "Next: taskbot.sh --next $TARGET_INDEX  (creates PR)" ;;
+      done) ok "Next: taskbot.sh --promote $TARGET_INDEX" ;;
+      *)    ok "Next: taskbot.sh --next $TARGET_INDEX" ;;
+    esac
+  else
+    warn "Review may have failed — check log: $REVIEW_LOG"
+    exit 1
+  fi
+
+  exit 0
+fi
+
+# ── Auto-next mode ───────────────────────────────────────────────────
+if [ "$MODE" = "auto_next" ]; then
+  if [ -z "$TARGET_INDEX" ]; then
+    err "Next requires a task index: $0 --next <number>"
+    exit 1
+  fi
+
+  # Find task slug (must be in docs/dev/)
+  NEXT_TASK=$(find "$DEV_DIR" -maxdepth 1 -name "${TARGET_INDEX}-*.md" -printf '%f\n' | head -1)
+  if [ -z "$NEXT_TASK" ]; then
+    err "No task with index $TARGET_INDEX found in docs/dev/"
+    exit 1
+  fi
+
+  NEXT_SLUG="${NEXT_TASK%.md}"
+
+  if [ ! -f "$STATE_DIR/$NEXT_SLUG.json" ]; then
+    warn "No state file for task $TARGET_INDEX ($NEXT_SLUG)"
+    warn "This task predates the workflow system."
+    warn "To promote: taskbot.sh --promote $TARGET_INDEX"
+    exit 0
+  fi
+
+  OP=$(next_op "$NEXT_SLUG")
+  PR_METHOD=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('pr', {}).get('create_method', 'gh_cli'))" 2>/dev/null || echo "gh_cli")
+
+  case "$OP" in
+    code)
+      err "Code phase not complete. Run: taskbot.sh $TARGET_INDEX"
+      exit 1
+      ;;
+    review)
+      exec "$0" "$PROJECT_DIR" --review "$TARGET_INDEX"
+      ;;
+    run)
+      ok "Human test step: run the app from the worktree and verify manually."
+      ok "  taskbot.sh --run $TARGET_INDEX   (starts dev server from worktree)"
+      ok ""
+      ok "When done testing, call --next again to advance:"
+      ok "  taskbot.sh --next $TARGET_INDEX"
+      mark_done "$NEXT_SLUG" "run"
+      next=$(next_op "$NEXT_SLUG")
+      ok "Marked 'run' complete. Next op: $next"
+      ;;
+    pr)
+      NEXT_BRANCH=$(load_state_field "$NEXT_SLUG" "branch")
+      NEXT_MERGE_INTO=$(load_state_field "$NEXT_SLUG" "merge_into")
+      if [ "$PR_METHOD" = "gh_cli" ]; then
+        PR_REPO=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('pr', {}).get('repo', ''))" 2>/dev/null || echo "")
+        PR_REVIEWER=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json')).get('pr', {}).get('reviewer', ''))" 2>/dev/null || echo "")
+        PR_TITLE=$(python3 - "$DEV_DIR/$NEXT_TASK" <<'PYEOF'
+import sys, re, os
+task = open(sys.argv[1]).read()
+m = re.search(r'^## Problem\n(.+?)(?:\n|$)', task, re.MULTILINE)
+if m:
+    print(m.group(1).strip()[:72])
+else:
+    fname = os.path.basename(sys.argv[1]).replace('.md', '').replace('-', ' ')
+    print(fname[:72])
+PYEOF
+)
+        log "Creating PR: $NEXT_BRANCH → $NEXT_MERGE_INTO"
+        PR_ARGS=(--base "$NEXT_MERGE_INTO" --head "$NEXT_BRANCH" --title "$PR_TITLE")
+        [ -n "$PR_REPO" ] && PR_ARGS=(--repo "$PR_REPO" "${PR_ARGS[@]}")
+        [ -n "$PR_REVIEWER" ] && PR_ARGS=("${PR_ARGS[@]}" --reviewer "$PR_REVIEWER")
+        PR_URL=$(gh pr create "${PR_ARGS[@]}" 2>&1 | grep -E 'https?://' | tail -1 || true)
+        if [ -n "$PR_URL" ]; then
+          set_pr_url "$NEXT_SLUG" "$PR_URL"
+          mark_done "$NEXT_SLUG" "pr"
+          ok "PR created: $PR_URL"
+          ok "Next: taskbot.sh --promote $TARGET_INDEX"
+        else
+          err "PR creation may have failed — check output above"
+          exit 1
+        fi
+      else
+        warn "PR method is '$PR_METHOD' — create PR manually:"
+        warn "  Branch: $NEXT_BRANCH → $NEXT_MERGE_INTO"
+        warn "Then run: taskbot.sh --promote $TARGET_INDEX"
+      fi
+      ;;
+    merge|deploy_check)
+      ok "Next step is '$OP' — run: taskbot.sh --promote $TARGET_INDEX"
+      ;;
+    done)
+      ok "All operations complete. Run: taskbot.sh --promote $TARGET_INDEX"
+      ;;
+    no_state)
+      err "No state file found for task $TARGET_INDEX"
+      exit 1
+      ;;
+    *)
+      err "Unknown next operation: $OP"
+      exit 1
+      ;;
+  esac
+
+  exit 0
+fi
+
 # ── Validate project ────────────────────────────────────────────────
-if [ ! -f "$INSTRUCTIONS" ]; then
+if [ ! -f "$INSTRUCTIONS" ] && [ "$MODE" != "list" ] && [ "$MODE" != "dry" ]; then
   err "No AGENT_INSTRUCTIONS.md found in $DOCS_DIR"
   err "Run: $0 $PROJECT_DIR --configure"
   exit 1
@@ -323,6 +850,108 @@ find_task_by_index() {
 
 task_index() {
   echo "$1" | grep -oP '^\d+'
+}
+
+# ── Workflow + state helpers ─────────────────────────────────────────
+
+read_workflow() {
+  local task_path="$1"
+  local dev_branch
+  dev_branch=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json'))['dev_branch'])" 2>/dev/null || echo "dev")
+  python3 - "$task_path" "$dev_branch" <<'PYEOF'
+import sys, re
+task_path, dev_b = sys.argv[1], sys.argv[2]
+task = open(task_path).read()
+m = re.search(r'## Workflow\n(.*?)(?=\n## |\Z)', task, re.DOTALL)
+if not m:
+    print(f'standard:code,pr:{dev_b}:{dev_b}')
+    sys.exit(0)
+section = m.group(1)
+def get(key, default):
+    r = re.search(r'^' + key + r':\s*(.+)$', section, re.MULTILINE)
+    return r.group(1).strip() if r else default
+preset = get('preset', 'standard')
+ops_map = {'instant': 'code,merge', 'standard': 'code,pr', 'thorough': 'code,review,run,pr'}
+operations = get('operations', ops_map.get(preset, 'code,pr'))
+branch_from = get('branch_from', dev_b)
+merge_into = get('merge_into', dev_b)
+print(f'{preset}:{operations}:{branch_from}:{merge_into}')
+PYEOF
+}
+
+init_state() {
+  local slug="$1" preset="$2" operations="$3" branch="$4" branch_from="$5" merge_into="$6"
+  mkdir -p "$STATE_DIR"
+  python3 - "$STATE_DIR/$slug.json" "$slug" "$preset" "$operations" "$branch" "$branch_from" "$merge_into" <<'PYEOF'
+import sys, json
+path, slug, preset, operations, branch, branch_from, merge_into = sys.argv[1:8]
+data = {
+    'slug': slug,
+    'preset': preset,
+    'branch': branch,
+    'branch_from': branch_from,
+    'merge_into': merge_into,
+    'operations': operations.split(','),
+    'completed': ['code'],
+    'pr_url': None,
+}
+json.dump(data, open(path, 'w'), indent=2)
+PYEOF
+}
+
+mark_done() {
+  local slug="$1" op="$2"
+  python3 - "$STATE_DIR/$slug.json" "$op" <<'PYEOF'
+import sys, json
+path, op = sys.argv[1], sys.argv[2]
+data = json.load(open(path))
+if op not in data['completed']:
+    data['completed'].append(op)
+json.dump(data, open(path, 'w'), indent=2)
+PYEOF
+}
+
+next_op() {
+  local slug="$1"
+  local state_file="$STATE_DIR/$slug.json"
+  if [ ! -f "$state_file" ]; then
+    echo "no_state"
+    return
+  fi
+  python3 - "$state_file" <<'PYEOF'
+import sys, json
+data = json.load(open(sys.argv[1]))
+ops = data.get('operations', [])
+done = data.get('completed', [])
+for op in ops:
+    if op not in done:
+        print(op)
+        exit()
+print('done')
+PYEOF
+}
+
+load_state_field() {
+  local slug="$1" field="$2"
+  local state_file="$STATE_DIR/$slug.json"
+  [ -f "$state_file" ] || { echo ""; return; }
+  python3 - "$state_file" "$field" <<'PYEOF'
+import sys, json
+data = json.load(open(sys.argv[1]))
+val = data.get(sys.argv[2], '')
+print(val if val is not None else '')
+PYEOF
+}
+
+set_pr_url() {
+  local slug="$1" url="$2"
+  python3 - "$STATE_DIR/$slug.json" "$url" <<'PYEOF'
+import sys, json
+path, url = sys.argv[1], sys.argv[2]
+data = json.load(open(path))
+data['pr_url'] = url
+json.dump(data, open(path, 'w'), indent=2)
+PYEOF
 }
 
 # ── Pre-flight checks ────────────────────────────────────────────────
@@ -354,8 +983,9 @@ run_task() {
   log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
   # Read config from taskbot.json
-  local dev_branch
+  local dev_branch prod_branch
   dev_branch=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json'))['dev_branch'])")
+  prod_branch=$(python3 -c "import json; print(json.load(open('$DOCS_DIR/taskbot.json'))['prod_branch'])")
 
   # Read additional repos (if multi-repo project)
   local repos_json
@@ -373,7 +1003,10 @@ print(json.dumps(repos))
   if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
     log "Reusing existing branch $branch"
   else
-    git branch "$branch" "origin/$dev_branch" 2>/dev/null || git branch "$branch" "$dev_branch"
+    git branch "$branch" "origin/$dev_branch" 2>/dev/null \
+      || git branch "$branch" "$dev_branch" 2>/dev/null \
+      || git branch "$branch" "origin/$prod_branch" 2>/dev/null \
+      || git branch "$branch" "$prod_branch"
   fi
   if [ -d "$worktree_dir" ]; then
     git worktree remove --force "$worktree_dir" 2>/dev/null || true
@@ -406,7 +1039,10 @@ print(json.dumps(repos))
       if git show-ref --verify --quiet "refs/heads/$sibling_branch" 2>/dev/null; then
         log "Reusing existing branch $sibling_branch in $repo_name"
       else
-        git branch "$sibling_branch" "origin/$dev_branch" 2>/dev/null || git branch "$sibling_branch" "$dev_branch"
+        git branch "$sibling_branch" "origin/$dev_branch" 2>/dev/null \
+          || git branch "$sibling_branch" "$dev_branch" 2>/dev/null \
+          || git branch "$sibling_branch" "origin/$prod_branch" 2>/dev/null \
+          || git branch "$sibling_branch" "$prod_branch"
       fi
       if [ -d "$sibling_wt" ]; then
         git worktree remove --force "$sibling_wt" 2>/dev/null || true
@@ -459,21 +1095,28 @@ Read ${INSTRUCTIONS} for how to execute, then read ${task_path} for the task. Ex
   if tail -20 "$log_file" | grep -qi "SUCCESS"; then
     ok "Task $task_file completed successfully"
 
-    # Clean up all worktrees
-    cd "$PROJECT_DIR"
-    git worktree remove --force "$worktree_dir" 2>/dev/null || true
-    git branch -d "$branch" 2>/dev/null || true
-    for pair in $sibling_worktrees; do
-      local sib_repo="${pair%%:*}"
-      local sib_wt="${pair##*:}"
-      cd "$sib_repo"
-      git worktree remove --force "$sib_wt" 2>/dev/null || true
-      git branch -d "$branch" 2>/dev/null || true
-    done
+    # Parse workflow from task doc
+    workflow=$(read_workflow "$task_path")
+    wf_preset=$(echo "$workflow" | cut -d: -f1)
+    wf_operations=$(echo "$workflow" | cut -d: -f2)
+    wf_branch_from=$(echo "$workflow" | cut -d: -f3)
+    wf_merge_into=$(echo "$workflow" | cut -d: -f4)
+
+    # Write state file (worktree stays alive for review/run/promote)
+    init_state "$slug" "$wf_preset" "$wf_operations" "$branch" "$wf_branch_from" "$wf_merge_into"
 
     # Move task doc to docs/dev/
     mv "$task_path" "$DEV_DIR/$task_file"
     ok "Moved $task_file → docs/dev/"
+
+    # Hint next step
+    next=$(next_op "$slug")
+    case "$next" in
+      review) ok "Next: taskbot.sh --review $index" ;;
+      run)    ok "Next: taskbot.sh --run $index  (then --next $index)" ;;
+      pr)     ok "Next: taskbot.sh --next $index  (creates PR)" ;;
+      *)      ok "Next: taskbot.sh --next $index" ;;
+    esac
 
     return 0
   else
@@ -516,7 +1159,7 @@ main() {
       echo ""
       warn "On dev (need review/merge):"
       echo "$dev_tasks" | while read -r t; do
-        echo "  $(task_index "$t"). $t"
+        echo "  $(task_index "$t"). $t  [next: $(next_op "${t%.md}")]"
       done
     fi
 
