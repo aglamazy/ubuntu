@@ -124,6 +124,16 @@ fi
 
 # Resolve to absolute path
 PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+
+# For authoring commands, always work in the main worktree (not a feature branch worktree)
+if [[ "$MODE" =~ ^(new|idea|configure)$ ]]; then
+  MAIN_WORKTREE=$(git -C "$PROJECT_DIR" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')
+  if [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$PROJECT_DIR" ]; then
+    log "Using main worktree: $MAIN_WORKTREE"
+    PROJECT_DIR="$MAIN_WORKTREE"
+  fi
+fi
+
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
 TASKBOT_HOME="$(cd "$(dirname "$0")" && pwd)"
 STREAM_FILTER="$TASKBOT_HOME/stream-filter.py"
@@ -341,10 +351,23 @@ if [ "$MODE" = "done" ]; then
     exit 1
   fi
   DONE_SRC=$(find "$DEV_DIR" "$DOCS_DIR" -maxdepth 1 -name "${TARGET_INDEX}-*.md" 2>/dev/null | head -1)
+  DONE_SLUG="${DONE_TASK%.md}"
   mkdir -p "$DOCS_DIR/done"
   mv "$DONE_SRC" "$DOCS_DIR/done/$DONE_TASK"
-  rm -f "$STATE_DIR/${DONE_TASK%.md}.json"
+  rm -f "$STATE_DIR/$DONE_SLUG.json"
   ok "Done: $DONE_TASK → docs/done/"
+
+  # Clean up worktree and feature branch
+  DONE_BRANCH="taskbot/$DONE_SLUG"
+  DONE_WORKTREE="$PROJECT_DIR/.taskbot-worktrees/$DONE_SLUG"
+  cd "$PROJECT_DIR"
+  if [ -d "$DONE_WORKTREE" ]; then
+    git worktree remove --force "$DONE_WORKTREE" 2>/dev/null && ok "Removed worktree: $DONE_WORKTREE" || true
+  fi
+  if git show-ref --verify --quiet "refs/heads/$DONE_BRANCH"; then
+    git branch -d "$DONE_BRANCH" 2>/dev/null || git branch -D "$DONE_BRANCH" 2>/dev/null || true
+    ok "Deleted branch: $DONE_BRANCH"
+  fi
   exit 0
 fi
 
@@ -1004,6 +1027,19 @@ else:
     print(fname[:72])
 PYEOF
 )
+        log "Fetching origin..."
+        git -C "$PROJECT_DIR" fetch origin
+        log "Rebasing $NEXT_BRANCH onto origin/$NEXT_MERGE_INTO..."
+        if ! git -C "$PROJECT_DIR" rebase "origin/$NEXT_MERGE_INTO" "$NEXT_BRANCH" 2>&1; then
+          warn "Rebase conflict — launching Claude to resolve..."
+          (cd "$PROJECT_DIR" && claude "You are resolving a git rebase conflict on branch $NEXT_BRANCH (rebasing onto origin/$NEXT_MERGE_INTO). Use git status to see conflicting files, resolve all conflicts, then run 'git rebase --continue' until the rebase is complete. Do not create commits beyond what rebase requires.")
+          if [ -d "$PROJECT_DIR/.git/rebase-merge" ] || [ -d "$PROJECT_DIR/.git/rebase-apply" ]; then
+            err "Rebase still in progress — resolve manually then re-run: taskbot.sh --next $TARGET_INDEX"
+            exit 1
+          fi
+        fi
+        log "Pushing $NEXT_BRANCH..."
+        git -C "$PROJECT_DIR" push -u origin "$NEXT_BRANCH" --force-with-lease
         log "Creating PR: $NEXT_BRANCH → $NEXT_MERGE_INTO"
         PR_ARGS=(--base "$NEXT_MERGE_INTO" --head "$NEXT_BRANCH" --title "$PR_TITLE" --fill)
         [ -n "$PR_REPO" ] && PR_ARGS=(--repo "$PR_REPO" "${PR_ARGS[@]}")
