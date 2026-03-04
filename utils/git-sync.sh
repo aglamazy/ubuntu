@@ -194,6 +194,35 @@ for ((i=0; i<repo_count; i++)); do
         continue
     fi
 
+    # When a filter is active, filter branches are merge targets — source must be a non-filter branch.
+    # If most_advanced is itself a filter branch, find the most advanced non-filter branch instead.
+    if [ ${#FILTER_BRANCHES[@]} -gt 0 ]; then
+        for fb in "${FILTER_BRANCHES[@]}"; do
+            if [ "$fb" = "$most_advanced" ]; then
+                most_advanced=""
+                max_ahead=0
+                for branch in $all_branches; do
+                    skip=false
+                    for ffb in "${FILTER_BRANCHES[@]}"; do
+                        [ "$ffb" = "$branch" ] && skip=true && break
+                    done
+                    [ "$skip" = true ] && continue
+                    total_ahead=${ahead_counts[$branch]}
+                    if [ "$total_ahead" -gt "$max_ahead" ]; then
+                        max_ahead=$total_ahead
+                        most_advanced=$branch
+                    fi
+                done
+                break
+            fi
+        done
+    fi
+
+    if [ -z "$most_advanced" ] || [ "$max_ahead" -eq 0 ]; then
+        echo -e "\n  ${GREEN}✓ All branches are in sync${NC}"
+        continue
+    fi
+
     echo -e "\n  ${YELLOW}Most advanced: $most_advanced (+$max_ahead commits)${NC}"
 
     # Determine which branches to merge into
